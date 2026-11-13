@@ -9,3 +9,5 @@ REPORT.md
 __pycache__/
 .pytest_cache/
 *.tar.gz
+# design specs and implementation plans (never committed)
+docs/
