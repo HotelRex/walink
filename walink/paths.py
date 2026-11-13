@@ -1,8 +1,7 @@
 """Filesystem locations, defined once.
 
 logs/   per-run logs, failure screenshots, the remote audit log. Sensitive; safe to purge.
-state/  the phone lock and the remote rate-limit state. Never purge while walink can run:
-        deleting the lock breaks mutual exclusion, deleting the rate file resets the limits.
+state/  the phone lock. Never purge while walink can run: deleting a held lock lets a second run drive the phone.
 """
 from pathlib import Path
 

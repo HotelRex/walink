@@ -1,6 +1,7 @@
 <# Re-link this workstation. Needs the built-in Windows OpenSSH client.
    Usage:  .\walink-relink.ps1 -Name "Hotel Rex" -Code "ABCD-EFGH"
-   Edit $Server and $Key below. The key is restricted on the server: it can only run "relink" and "last". #>
+   Edit $Server and $Key below. The server runs it as: link CODE --replace NAME --yes (no extra confirmation).
+   For everything else, open the TUI:  ssh -i <key> walink@controller #>
 param(
   [Parameter(Mandatory=$true)][string]$Name,
   [Parameter(Mandatory=$true)][string]$Code

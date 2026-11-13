@@ -29,20 +29,27 @@ Give the phone a DHCP reservation. Keep it charging and on Wi-Fi: with no SIM it
 
 ## Usage
 ```bash
+python walink.py                              # the TUI (needs an interactive terminal)
 python walink.py status                       # model, Android version, screen, W4B installed
 python walink.py list [--json]
-python walink.py link ABCD-EFGH --replace "Hotel Rex" --confirm-remove "Hotel Rex"
-python walink.py link ABCD-EFGH --name "Hotel Rex"      # only when a slot is free
-python walink.py unlink "Hotel Rex" --confirm-remove "Hotel Rex"
+python walink.py link ABCD-EFGH --replace "Hotel Rex"   # asks "Are you sure you want to delete Hotel Rex?"
+python walink.py link ABCD-EFGH --name "Desk 2"         # only when a slot is free
+python walink.py unlink "Hotel Rex" [--yes]
 python walink.py last "PayPal" [--json]           # newest message of a chat (opens it: marks it READ)
 python walink.py keepalive
 python walink.py reset                         # force-stop + relaunch WhatsApp, go to the launcher (recovery)
 python walink.py --dry-run link ABCD-EFGH --replace "Hotel Rex"   # goes as far as possible, changes nothing
 ```
+The TUI and the commands are the same program with the same rules (`walink/actions.py`); see **TUI** below.
 - stdout carries only the result (text, or JSON with `--json`); log lines go to stderr and `logs/<timestamp>/walink.log`,
   so `walink.py list --json | jq` works.
 - Code input is normalized (dashes/spaces dropped, uppercased, 8 alphanumerics required).
-- A real removal needs `--confirm-remove` with the **exact same name**. Names in `protected_devices` are always refused.
+- Every removal (`unlink`, or the removal half of `link --replace`) asks `Are you sure you want to delete <NAME>?`
+  before the phone is touched. Scripts pass `--yes`; without a terminal and without `--yes` the command is refused.
+  Names in `protected_devices` are always refused, by every path.
+- Exit codes: `0` ok, `2` failed or usage error, `4` refused (protected, not confirmed, unknown device, list full), `5` phone busy.
+- Every run is written to `logs/audit.log` (who, what, outcome; never message content). `notify_cmd` (optional) gets
+  link, remove, last-message and failure events.
 - Success = the new name appears in the list and is not "Logged out". Anything else exits non-zero.
 - `last` finds the chat via search by **exact** name (as shown in the chat list), checks the chat title, jumps to the newest
   message and prints `[day time] sender: text` (`me` for outgoing; `(non-text message)` for a photo/voice note without caption).
@@ -61,8 +68,20 @@ python walink.py --dry-run link ABCD-EFGH --replace "Hotel Rex"   # goes as far 
 and the phone is left on the WhatsApp home screen. **`logs/` can contain chat names and messages. Treat it as sensitive** and
 purge it regularly.
 
-**`state/` is not logs: never purge it while walink can run.** It holds `phone.lock` (deleting a held lock lets a second run
-drive the phone at the same time) and `remote-rate.json` (deleting it resets the remote rate limits).
+**`state/` is not logs: never purge it while walink can run.** It holds `phone.lock`: deleting a held lock lets a second run
+drive the phone at the same time.
+
+## TUI
+Run `python walink.py` (or log in over SSH, below). One screen:
+- left, the linked devices (`[locked]` = protected; `(free slot)` when there is room); right, live progress;
+- keys: `r` refresh, `l` link (on a device: replace it, name pre-filled; on `(free slot)`: new device), `d` delete,
+  `m` last message (quick picks from `quick_chats` in `config.yaml`, or type any chat name), `k` keepalive,
+  `s` status, `q` quit.
+- Enter the code **before** confirming: show the code on the computer first, it expires in about a minute.
+- The confirmation dialog starts on **No**. While the phone works, the other keys are disabled; `q` asks to quit after
+  the current action. If the SSH connection drops mid-action, the action still finishes and the phone is locked.
+- `python walink.py --dry-run` opens the TUI in dry-run mode (shown in the header).
+- The device list is read from the phone (~10 s) on start and on `r`, not continuously.
 
 ## Human-like pacing (ban avoidance)
 All input goes through `walink/device.py` (the only module that touches uiautomator2/adb) and `walink/humanize.py`.
@@ -80,28 +99,27 @@ middle 60%), never the same pixel twice in a row. Launch/Home use `am start` (~0
 systemd alternative: a `walink-keepalive.service` running the same command and a `.timer` with `OnCalendar=*-*-1/3 09:10`.
 On Windows Task Scheduler, run `python walink.py keepalive` on a schedule from the checkout directory.
 
-## Remote trigger from Windows (untrusted network)
-Anyone who can trigger a relink can attach **their own** device to the account, and anyone who can run `last`
-reads that chat (verification codes included). So this is locked down:
-- **SSH with a per-workstation key and a forced command.** In `~walink/.ssh/authorized_keys`, one line per workstation:
+## Remote access over SSH (workstations)
+walink is an internal tool: an authorized workstation key can do everything walink can do. The guards are against
+mistakes (protected devices, "Are you sure?"), not against key holders. Setup is manual:
+- **One key per workstation, with a forced command.** In `~walink/.ssh/authorized_keys`, one line each:
   ```
-  restrict,command="/path/.venv/bin/python /path/walink_remote.py alice-pc" ssh-ed25519 AAAA... alice-pc
+  restrict,pty,command="/path/.venv/bin/python /path/walink_remote.py alice-pc" ssh-ed25519 AAAA... alice-pc
   ```
-  `restrict` disables shell, port forwarding, agent and pty. The label (`alice-pc`) names the key in logs and rate limits.
-  Revoke a workstation by deleting its line.
-- The wrapper accepts **only** `relink "<NAME>" <CODE>` and `last "<CHAT>"`.
-  - Relinks work only for names in `remote.allowed_names` (never `protected_devices`).
-  - `last` works only for chats listed in `remote.readable_chats` (exact names; **empty by default = nothing readable**).
-    The message goes back to the caller only; the audit log and `notify_cmd` get the chat name, never the content.
-- Everything shares **one lock** with the CLI and cron keepalive (a second request gets "busy", exit 5).
-  Per-key rate limit (relink + last together, counted once the lock is taken, so a "busy" answer is free), an audit log
-  (`logs/remote-audit.log`), and an optional `notify_cmd` on every event (best effort: a failing notifier never stops a run).
-  If `state/remote-rate.json` is unreadable or corrupt, remote requests are **refused** until you fix or delete it.
-  If a run exceeds `timeout_s`, the wrapper runs `walink.py reset` to put the phone back on the launcher and lock it.
+  `restrict` disables shell, port forwarding and agent; `pty` gives the TUI a terminal. The label (`alice-pc`) names the
+  key in `logs/audit.log`. Revoke a workstation by deleting its line.
+- `ssh -i <key> walink@controller` opens the **TUI** (Windows: use Windows Terminal with the built-in OpenSSH client).
+- `ssh -i <key> walink@controller "<command>"` runs **one** walink command, same syntax as `walink.py`
+  (`"list --json"`, `"unlink 'Sara' --yes"`, `"last 'PayPal'"`); output streams back live, the exit code is passed through.
+  Without a terminal, removals need `--yes`. The older form `relink "<NAME>" <CODE>` still works
+  (= `link CODE --replace NAME --yes`).
+- Everything shares **one lock** with the CLI, other TUIs and cron (a second request gets "busy", exit 5); a TUI holds it
+  only while an action runs. If a one-shot command exceeds `remote.timeout_s` (240 s), it is stopped and
+  `walink.py reset` puts the phone back on the launcher and locks it.
 - Run sshd behind WireGuard/Tailscale if you can, on a non-default port, with `PasswordAuthentication no`.
-- Clients (Windows 10/11 built-in OpenSSH; edit `$Server` and `$Key`):
+- Scripts (Windows 10/11 built-in OpenSSH; edit `$Server` and `$Key`):
   `windows/walink-relink.ps1 -Name "Hotel Rex" -Code "ABCD-EFGH"` and `windows/walink-last.ps1 -Chat "PayPal"`.
-- Remote screen control (the old scrcpy `session`) was **removed**; there is no way to get raw adb access over SSH.
+- There is no way to get a shell or raw adb access over SSH.
 
 ## Running the controller on Windows instead of Linux
 The code is cross-platform (adb, uiautomator2, the phone lock and the SSH wrapper all work on Windows); only the setup differs.
@@ -133,11 +151,11 @@ The code is cross-platform (adb, uiautomator2, the phone lock and the SSH wrappe
    for members of Administrators sshd ignores the user's own file and reads `C:\ProgramData\ssh\administrators_authorized_keys`.
    In `C:\Users\walink\.ssh\authorized_keys` (path without spaces; only `walink`, SYSTEM and Administrators may access the file):
    ```
-   restrict,command="C:\walink\.venv\Scripts\python.exe C:\walink\walink_remote.py alice-pc" ssh-ed25519 AAAA... alice-pc
+   restrict,pty,command="C:\walink\.venv\Scripts\python.exe C:\walink\walink_remote.py alice-pc" ssh-ed25519 AAAA... alice-pc
    ```
    In `C:\ProgramData\ssh\sshd_config` set `PasswordAuthentication no` and `AllowUsers walink`, then restart sshd.
    The client scripts in `windows/` are unchanged; only `$Server` points at the new machine.
-6. **Protect `logs/` and `state/`** (logs can hold chat screenshots; state holds the rate limits): run
+6. **Protect `logs/` and `state/`** (logs can hold chat screenshots; state holds the phone lock): run
    `icacls C:\walink\logs /inheritance:r /grant:r walink:(OI)(CI)F Administrators:(OI)(CI)F SYSTEM:(OI)(CI)F` and the same for `C:\walink\state`.
    `notify_cmd` runs through `cmd.exe` on Windows. All text I/O is UTF-8 (emoji and accented chat names are fine).
 7. Run the tests there: `.venv\Scripts\python -m pytest -q tests`, then `walink.py list` and a `last` on the phone.
