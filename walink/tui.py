@@ -368,9 +368,9 @@ class WalinkApp(App):
     def on_unmount(self) -> None:
         log.removeHandler(self._handler)
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+    async def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id == "menu":
-            self.run_action(event.option.id)
+            await self.run_action(event.option.id)      # a coroutine: without await nothing happens
 
     def write_log(self, line: str) -> None:
         self.query_one("#log", RichLog).write(line)

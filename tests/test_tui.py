@@ -311,3 +311,29 @@ def test_busy_phone_shows_a_clear_message():
             await wait_screen(pilot, app, "MessageScreen")
             assert app.screen.title_text == "The phone is busy"
     run(go())
+
+
+def test_enter_on_menu_items_opens_them():
+    async def go():
+        app, fake, _ = make_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")                              # 1st item: last message
+            await wait_screen(pilot, app, "LastScreen")
+            await pilot.press("escape")
+            await wait_screen(pilot, app, "Screen")
+            await pilot.press("down", "enter")                      # 2nd item: link -> device picker
+            await wait_screen(pilot, app, "DevicePickScreen")
+            assert ("list",) in fake.calls
+    run(go())
+
+
+def test_enter_on_quit_item_exits():
+    async def go():
+        app, fake, _ = make_app()
+        exits = []
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.exit = lambda *a, **k: exits.append(1)
+            await pilot.press("end", "enter")                       # last item: Quit
+            await wait_for(pilot, lambda: exits, "exit")
+    run(go())
