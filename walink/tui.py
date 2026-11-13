@@ -9,6 +9,8 @@ dies, the running action still finishes (and locks the phone) before the process
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import inspect
 import json
 import logging
 import signal
@@ -387,13 +389,31 @@ class WalinkApp(App):
 
     # ---------- threads ----------
     def ui(self, fn: Callable, *args, **kwargs) -> Any:
-        """Run `fn` on the UI thread and return its result; False if the UI is gone (e.g. after a hangup)."""
+        """Run `fn` on the UI thread and return its result; False if the UI is gone (e.g. after a hangup).
+        Like App.call_from_thread, but it never waits forever: it gives up as soon as the app stops."""
         if threading.get_ident() == self._main_thread:
             return fn(*args, **kwargs)
-        try:
-            return self.call_from_thread(fn, *args, **kwargs)
-        except Exception:
+        loop = self._event_loop
+        if loop is None or loop.is_closed() or not self.is_running:
             return False
+
+        async def call() -> Any:
+            with self._context():
+                result = fn(*args, **kwargs)
+                return await result if inspect.isawaitable(result) else result
+        try:
+            future = asyncio.run_coroutine_threadsafe(call(), loop)
+        except RuntimeError:
+            return False
+        while True:
+            try:
+                return future.result(timeout=0.2)
+            except concurrent.futures.TimeoutError:
+                if not self.is_running or loop.is_closed():
+                    future.cancel()
+                    return False
+            except Exception:
+                return False
 
     def _confirm(self, question: str) -> bool:
         """Called by the action thread: blocks on the modal. A hangup or a dead UI answers No."""
