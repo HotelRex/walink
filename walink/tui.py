@@ -237,7 +237,7 @@ class LastScreen(ModalScreen):
             yield Static("Opening the chat marks it as read on the phone.", classes="hint")
             if self.chats:
                 yield OptionList(*self.chats, id="quick")
-            yield Input(placeholder="Or type the exact chat name, as in the chat list", id="chat")
+            yield Input(placeholder="Or type the chat name (whole name, any case)", id="chat")
             with Horizontal(classes="buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Read", id="read", variant="primary")

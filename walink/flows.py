@@ -137,24 +137,29 @@ def verify_linked(dev: Device, name: str) -> dict:
     return match[0]
 
 
-def open_chat(dev: Device, name: str, progress: Progress = _no_progress) -> None:
-    """From the chat list: search the chat by exact name, open it, verify the title, jump to the newest message.
-    Opening a chat marks it as read (blue ticks are sent)."""
+def _same_chat(a: str, b: str) -> bool:
+    return a.casefold() == b.casefold()
+
+
+def open_chat(dev: Device, name: str, progress: Progress = _no_progress) -> str:
+    """From the chat list: search the chat by its whole name (case does not matter), open it, verify the title,
+    jump to the newest message. Returns the name as WhatsApp shows it. Opening a chat marks it as read."""
     progress("Opening WhatsApp", 0.0)
     dev.open_app_home()
     progress(f"Searching for the chat '{name}'", 0.4)
     dev.tap(S.SEARCH_BAR)
     dev.type_into_field(S.SEARCH_INPUT, name, tap_first=False)   # tapping the bar focuses the input
-    row = {"resourceId": S.CHAT_ROW_NAME_ID, "text": name}
+    row = {"resourceId": S.CHAT_ROW_NAME_ID, **S.text_ignoring_case(name)}
     if not dev.exists(row, timeout=8):
-        raise FlowError(f"no chat named exactly '{name}'")
+        raise FlowError(f"no chat named '{name}'")
     progress("Opening the chat", 0.7)
     dev.tap(row)
     dev.wait_activity(S.ACT_CHAT)
     shown = dev.text(S.CHAT_HEADER_NAME)
-    if shown != name:
+    if not _same_chat(shown, name):
         raise FlowError(f"opened '{shown}' instead of '{name}'")
     _go_to_newest(dev)
+    return shown
 
 
 def _go_to_newest(dev: Device) -> None:
@@ -163,31 +168,33 @@ def _go_to_newest(dev: Device) -> None:
         dev.wait_gone(S.CHAT_SCROLL_BOTTOM, timeout=10)
 
 
-def resume_chat(dev: Device, name: str) -> bool:
-    """Continue in chat `name` if a previous action left it open and the phone still shows it."""
+def resume_chat(dev: Device, name: str) -> str | None:
+    """Continue in chat `name` (case does not matter) if a previous action left it open and the phone still
+    shows it. Returns the name as WhatsApp shows it, or None."""
     dev.wake_and_unlock()
     if dev.activity() != S.ACT_CHAT:
-        return False
+        return None
     try:
         shown = dev.text(S.CHAT_HEADER_NAME, timeout=1)
     except DeviceError:
-        return False
-    if shown != name:
-        return False
+        return None
+    if not _same_chat(shown, name):
+        return None
     _go_to_newest(dev)
-    return True
+    return shown
 
 
 def last_message(dev: Device, name: str, progress: Progress = _no_progress, resume: bool = False) -> dict:
     """Open the chat `name` (or, with `resume`, continue in it if it is still open) and return its newest
     message (see walink.messages.last_message)."""
-    if resume and resume_chat(dev, name):
-        progress(f"Continuing in the open chat '{name}'", 0.7)
+    shown = resume_chat(dev, name) if resume else None
+    if shown:
+        progress(f"Continuing in the open chat '{shown}'", 0.7)
     else:
-        open_chat(dev, name, progress)
+        shown = open_chat(dev, name, progress)
     progress("Reading the newest message", 0.9)
     try:
         msg = parse_last_message(dev.hierarchy())
     except ValueError as e:
         raise FlowError(f"could not read the last message of '{name}': {e}")
-    return {"chat": name, **msg}
+    return {"chat": shown, **msg}

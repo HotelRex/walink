@@ -1,6 +1,6 @@
 <# Print the newest message of an allowed chat (e.g. a verification code). Needs the built-in Windows OpenSSH client.
    Usage:  .\walink-last.ps1 -Chat "PayPal"
-   Edit $Server and $Key below. Any chat can be read (exact name, as in the chat list).
+   Edit $Server and $Key below. Any chat can be read (its whole name; case does not matter).
    Note: the phone opens the chat, so it is marked as read. #>
 param([Parameter(Mandatory=$true)][string]$Chat)
 $Server = "walink@controller.example.net"          # <- edit

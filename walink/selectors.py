@@ -12,6 +12,12 @@ def _id(name: str) -> dict:
     return {"resourceId": _rid(name)}
 
 
+def text_ignoring_case(text: str) -> dict:
+    """Selector for an element whose WHOLE text equals `text`, ignoring case. uiautomator matches Java regexes;
+    \\Q...\\E quotes every character (an "\\E" inside the text is closed, escaped and reopened)."""
+    return {"textMatches": "(?i)\\Q" + text.replace("\\E", "\\E\\\\E\\Q") + "\\E"}
+
+
 def code_box(i: int) -> dict:
     """The i-th (1-based) box of the 8-character link code."""
     return {"description": f"Enter 8-character code, {i} of 8"}

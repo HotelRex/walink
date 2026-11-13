@@ -52,7 +52,7 @@ The TUI and the commands are the same program with the same rules (`walink/actio
 - Every run is written to `logs/audit.log` (who, what, outcome; never message content). `notify_cmd` (optional) gets
   link, remove, last-message and failure events.
 - Success = the new name appears in the list and is not "Logged out". Anything else exits non-zero.
-- `last` finds the chat via search by **exact** name (as shown in the chat list), checks the chat title, jumps to the newest
+- `last` finds the chat via search by its **whole** name (case does not matter: `paypal` finds "PayPal"), checks the chat title, jumps to the newest
   message and prints `[day time] sender: text` (`me` for outgoing; `(non-text message)` for a photo/voice note without caption).
   Opening the chat **sends read receipts and clears the unread badge**. Message text is never written to `logs/`
   (but a failure screenshot can show the chat). Takes ~26 s. Very long messages may be cut at WhatsApp's "Read more".

@@ -225,9 +225,10 @@ def last_message(ctx: Context, chat: str) -> dict:
     """Open `chat` (marks it read) and return its newest message. The content is returned, never logged."""
     with _session(ctx, "LAST", f"chat='{chat}'", notify_ok=True) as dev:
         last = screen_state.recall()
-        resume = bool(last and last["screen"] == screen_state.CHAT and last["chat"] == chat)
+        resume = bool(last and last["screen"] == screen_state.CHAT
+                      and (last["chat"] or "").casefold() == chat.casefold())
         msg = flows.last_message(dev, chat, _part(ctx, 0.05, 0.9), resume=resume)
-        screen_state.remember(screen_state.CHAT, chat)
+        screen_state.remember(screen_state.CHAT, msg.get("chat") or chat)
         log.info("read last message of '%s' (%s, %s)", chat, msg["direction"], msg["kind"])
         return msg
 

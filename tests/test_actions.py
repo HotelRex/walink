@@ -250,3 +250,9 @@ def test_last_message_continues_only_in_the_same_chat(env):
     actions.last_message(env["ctx"], "Bank")
     assert [o[1] for o in env["order"] if o[0] == "last"] == [("PayPal", False), ("PayPal", True), ("Bank", False)]
     assert screen_state.recall()["chat"] == "Bank"
+
+
+def test_last_message_resume_ignores_case(env):
+    actions.last_message(env["ctx"], "PayPal")
+    actions.last_message(env["ctx"], "paypal")
+    assert [o[1] for o in env["order"] if o[0] == "last"] == [("PayPal", False), ("paypal", True)]

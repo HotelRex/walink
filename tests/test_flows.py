@@ -113,3 +113,56 @@ def test_resume_chat_only_the_same_chat_and_jumps_to_newest():
     assert not flows.resume_chat(Phone(S.ACT_HOME), "PayPal")
     phone = Phone(S.ACT_CHAT, chat_title="PayPal", scroll_bottom=True)
     assert flows.resume_chat(phone, "PayPal") and "tap" in phone.calls
+
+
+class ChatList:
+    """Chat list whose search finds 'PayPal' whatever the case typed."""
+
+    def __init__(self, real_name="PayPal"):
+        self.real, self.calls, self.opened = real_name, [], False
+
+    def open_app_home(self):
+        pass
+
+    def tap(self, sel):
+        self.calls.append(("tap", sel))
+        if "textMatches" in sel:
+            self.opened = True
+
+    def type_into_field(self, sel, text, tap_first=True):
+        self.calls.append(("type", text))
+
+    def exists(self, sel, timeout=0):
+        if "textMatches" in sel:
+            import re
+            pattern = sel["textMatches"].replace("(?i)", "").replace("\\Q", "").replace("\\E", "")
+            return re.fullmatch(re.escape(pattern), self.real, re.IGNORECASE) is not None
+        return False
+
+    def wait_activity(self, activity, timeout=15):
+        pass
+
+    def text(self, sel, timeout=5):
+        return self.real
+
+
+@pytest.mark.parametrize("typed", ["paypal", "PAYPAL", "PayPal", "pAyPaL"])
+def test_open_chat_ignores_case(typed):
+    phone = ChatList()
+    flows.open_chat(phone, typed)
+    assert phone.opened and ("type", typed) in phone.calls
+
+
+def test_open_chat_still_needs_the_whole_name():
+    with pytest.raises(flows.FlowError):
+        flows.open_chat(ChatList(), "pay")
+
+
+def test_resume_chat_ignores_case():
+    assert flows.resume_chat(Phone(S.ACT_CHAT, chat_title="PayPal"), "paypal")
+
+
+def test_text_ignoring_case_selector_quotes_regex_characters():
+    sel = S.text_ignoring_case("A+B (x)")
+    assert sel == {"textMatches": "(?i)\\QA+B (x)\\E"}
+    assert S.text_ignoring_case("a\\Eb")["textMatches"] == "(?i)\\Qa\\E\\\\E\\Qb\\E"
