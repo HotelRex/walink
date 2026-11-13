@@ -1,7 +1,8 @@
 """Command line: a thin front end over walink.actions (all rules live there).
 
 No command (and an interactive terminal) opens the TUI. stdout carries ONLY the command's result (plain text or
---json); logs go to stderr and to logs/<timestamp>/walink.log, so `walink.py list --json | jq` works.
+--json), so `walink.py list --json | jq` works. stderr shows the steps in plain words ("40% Entering the code");
+technical log lines only with --debug. Every run also writes logs/<timestamp>/walink.log.
 Exit codes: 0 ok, 2 failed or usage error, 4 refused (protected, not confirmed, ...), 5 phone busy."""
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="walink", description="Run without a command to open the TUI.")
     parser.add_argument("--serial")
     parser.add_argument("--dry-run", action="store_true", help="go as far as possible, change nothing")
+    parser.add_argument("--debug", action="store_true", help="show technical log lines (TUI: a log pane)")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("status")
     p_list = sub.add_parser("list")
@@ -66,17 +68,23 @@ def _interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def setup_logging() -> None:
-    """Log lines to stderr (each action adds its own per-run file log)."""
+def setup_logging(debug: bool) -> None:
+    """Technical log lines on stderr only with --debug (each action always adds its own per-run file log)."""
     for old in list(log.handlers):
         if getattr(old, "_walink_cli", False):
             log.removeHandler(old)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    if not debug:
+        return
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     handler._walink_cli = True
     log.addHandler(handler)
-    log.setLevel(logging.INFO)
-    log.propagate = False
+
+
+def print_progress(text: str, fraction: float) -> None:
+    print(f"{round(fraction * 100):3d}% {text}", file=sys.stderr, flush=True)
 
 
 def tty_confirm(question: str) -> bool:
@@ -130,7 +138,7 @@ def main(argv: list[str] | None = None, label: str | None = None) -> int:
     except SystemExit as e:                     # usage errors: return, never exit (used in-process over SSH)
         return EXIT_FAILED if e.code else EXIT_OK
     label = label or os.environ.get("WALINK_AUDIT_LABEL") or actions.default_label()
-    setup_logging()
+    setup_logging(args.debug)
     try:
         cfg = load_config()
     except ConfigError as e:
@@ -142,10 +150,10 @@ def main(argv: list[str] | None = None, label: str | None = None) -> int:
             parser.print_help(sys.stderr)
             return EXIT_FAILED
         tui = importlib.import_module("walink.tui")
-        return tui.run(cfg, label, serial=args.serial or cfg.get("serial"), dry_run=args.dry_run)
+        return tui.run(cfg, label, serial=args.serial or cfg.get("serial"), dry_run=args.dry_run, debug=args.debug)
 
     ctx = actions.Context(cfg=cfg, label=label, confirm=_confirm_for(args),
-                          serial=args.serial or cfg.get("serial"), dry_run=args.dry_run)
+                          serial=args.serial or cfg.get("serial"), dry_run=args.dry_run, progress=print_progress)
     try:
         _run(args, ctx)
         return EXIT_OK

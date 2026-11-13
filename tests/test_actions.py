@@ -90,7 +90,7 @@ def test_link_replace_confirms_then_removes_then_links(env):
     res = actions.link(env["ctx"], "abcd-efgh", replace="Hotel Rex")
     assert env["confirms"] == ["Are you sure you want to delete Hotel Rex?"]
     assert names(env) == ["open", "read", "remove", "link", "verify"]
-    assert env["order"][3][1] == ("ABCDEFGH", "Hotel Rex")
+    assert env["order"][3][1][:2] == ("ABCDEFGH", "Hotel Rex")
     assert res["name"] == "Hotel Rex"
 
 
@@ -183,3 +183,20 @@ def test_busy_propagates(env, monkeypatch):
 
 def test_default_label():
     assert actions.default_label().startswith("local:")
+
+
+def test_link_reports_increasing_progress_in_plain_words(env):
+    steps = []
+    env["ctx"].progress = lambda text, fraction: steps.append((text, fraction))
+    actions.link(env["ctx"], "ABCDEFGH", replace="Hotel Rex")
+    fractions = [f for _, f in steps]
+    assert fractions == sorted(fractions) and 0 < fractions[0] and fractions[-1] < 1
+    texts = [t for t, _ in steps]
+    assert "Removing 'Hotel Rex'" in texts and texts[-1] == "Locking the phone"
+
+
+def test_last_message_progress_never_contains_the_message(env):
+    steps = []
+    env["ctx"].progress = lambda text, fraction: steps.append(text)
+    actions.last_message(env["ctx"], "PayPal")
+    assert steps and not any("SECRET" in s for s in steps)

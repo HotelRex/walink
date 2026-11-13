@@ -41,8 +41,9 @@ python walink.py reset                         # force-stop + relaunch WhatsApp,
 python walink.py --dry-run link ABCD-EFGH --replace "Hotel Rex"   # goes as far as possible, changes nothing
 ```
 The TUI and the commands are the same program with the same rules (`walink/actions.py`); see **TUI** below.
-- stdout carries only the result (text, or JSON with `--json`); log lines go to stderr and `logs/<timestamp>/walink.log`,
-  so `walink.py list --json | jq` works.
+- stdout carries only the result (text, or JSON with `--json`), so `walink.py list --json | jq` works. stderr shows the
+  steps in plain words (`40% Entering the code`); technical log lines only with `--debug`. Every run also writes
+  `logs/<timestamp>/walink.log`.
 - Code input is normalized (dashes/spaces dropped, uppercased, 8 alphanumerics required).
 - Every removal (`unlink`, or the removal half of `link --replace`) asks `Are you sure you want to delete <NAME>?`
   before the phone is touched. Scripts pass `--yes`; without a terminal and without `--yes` the command is refused.
@@ -72,16 +73,20 @@ purge it regularly.
 drive the phone at the same time.
 
 ## TUI
-Run `python walink.py` (or log in over SSH, below). One screen:
-- left, the linked devices (`[locked]` = protected; `(free slot)` when there is room); right, live progress;
-- keys: `r` refresh, `l` link (on a device: replace it, name pre-filled; on `(free slot)`: new device), `d` delete,
-  `m` last message (quick picks from `quick_chats` in `config.yaml`, or type any chat name), `k` keepalive,
-  `s` status, `q` quit.
-- Enter the code **before** confirming: show the code on the computer first, it expires in about a minute.
-- The confirmation dialog starts on **No**. While the phone works, the other keys are disabled; `q` asks to quit after
-  the current action. If the SSH connection drops mid-action, the action still finishes and the phone is locked.
-- `python walink.py --dry-run` opens the TUI in dry-run mode (shown in the header).
-- The device list is read from the phone (~10 s) on start and on `r`, not continuously.
+Run `python walink.py` (or log in over SSH, below). It opens on a menu; the phone is only used once you pick something:
+- **Read the last message of a chat** (`m`): pick one of `quick_chats` (`config.yaml`) or type any chat name.
+  No device list is read for this.
+- **Link a computer** (`l`): the linked devices are read from the phone, you pick the one to replace (or `(free slot)`),
+  then enter the code and the name (pre-filled when replacing). Show the code on the computer first: it expires in
+  about a minute.
+- **Remove a linked device** (`d`), **Show the linked devices** (`r`), **Keepalive** (`k`), **Phone status** (`s`), **Quit** (`q`).
+- While the phone works, a dialog shows the current step in plain words, a progress bar and the elapsed seconds.
+  Results and errors appear in a dialog until you close it.
+- `[locked]` devices are protected: they cannot be picked for removal or replacement. Any removal asks
+  "Are you sure you want to delete <NAME>?", starting on **No**.
+- `q` during an action asks to quit after it finishes. If the SSH connection drops mid-action, the action still
+  finishes and the phone is locked.
+- `--dry-run` (shown in the header) changes nothing; `--debug` adds a pane with the technical log lines.
 
 ## Human-like pacing (ban avoidance)
 All input goes through `walink/device.py` (the only module that touches uiautomator2/adb) and `walink/humanize.py`.

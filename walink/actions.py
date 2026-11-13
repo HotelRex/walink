@@ -52,6 +52,12 @@ class Context:
     serial: str | None = None
     dry_run: bool = False
     device_factory: Callable = Device       # (serial, pacer) -> Device; replaced in tests
+    progress: Callable[[str, float], None] = lambda text, fraction: None   # plain-words step, 0..1 overall
+
+
+def _part(ctx: Context, lo: float, hi: float) -> Callable[[str, float], None]:
+    """A flow's own 0..1 progress mapped into [lo, hi] of the action's bar."""
+    return lambda text, fraction: ctx.progress(text, lo + (hi - lo) * fraction)
 
 
 def default_label() -> str:
@@ -102,6 +108,7 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
     dev = None
     try:
         event("START", notify_ok)
+        ctx.progress("Connecting to the phone", 0.02)
         dev = ctx.device_factory(ctx.serial or ctx.cfg.get("serial"), make_pacer(ctx.cfg))
         yield dev
         event("OK", notify_ok)
@@ -133,6 +140,7 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
         try:
             if dev and phone_lock and ctx.cfg.get("lock_screen_when_done", True):
                 try:
+                    ctx.progress("Locking the phone", 0.97)
                     dev.lock_screen()
                 except Exception as lock_error:
                     log.error("could not lock the screen: %s", lock_error)
@@ -145,14 +153,18 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
 
 def status(ctx: Context) -> dict:
     with _session(ctx, "STATUS", phone_lock=False) as dev:
+        ctx.progress("Reading the phone status", 0.5)
         return dev.info()
 
 
 def list_devices(ctx: Context) -> dict:
     """{'count', 'max', 'devices': [{'name', 'status', 'protected'}]}"""
     with _session(ctx, "LIST") as dev:
+        ctx.progress("Opening WhatsApp", 0.05)
         flows.open_linked_devices(dev)
+        ctx.progress("Reading the linked devices", 0.6)
         info = flows.read_devices(dev)
+        ctx.progress("Closing WhatsApp", 0.9)
         dev.leave_app()
     protected = _protected(ctx.cfg)
     return {**info, "devices": [{**d, "protected": d["name"] in protected} for d in info["devices"]]}
@@ -169,11 +181,14 @@ def link(ctx: Context, code: str, *, replace: str | None = None, name: str | Non
         _check_removal(ctx, replace)
     detail = f"replace='{replace}' name='{new_name}'" if replace else f"name='{new_name}'"
     with _session(ctx, "LINK", detail, notify_ok=True) as dev:
+        ctx.progress("Opening WhatsApp", 0.05)
         flows.open_linked_devices(dev)
+        ctx.progress("Reading the linked devices", 0.15)
         info = flows.read_devices(dev)
         if replace:
             if replace not in [d["name"] for d in info["devices"]]:
                 raise Refused(f"no such device: {replace}")
+            ctx.progress(f"Removing '{replace}'", 0.25)
             flows.remove_device(dev, replace, ctx.dry_run)
         elif info["count"] >= info["max"]:
             raise Refused("the list is full: replace a device instead")
@@ -181,7 +196,8 @@ def link(ctx: Context, code: str, *, replace: str | None = None, name: str | Non
             log.info("[dry-run] would link code %s as '%s'", code[:2] + "******", new_name)
             dev.leave_app()
             return {"name": new_name, "status": "dry-run"}
-        flows.link_with_code(dev, code, new_name)
+        flows.link_with_code(dev, code, new_name, _part(ctx, 0.35, 0.85))
+        ctx.progress("Checking that the new device is linked", 0.88)
         res = flows.verify_linked(dev, new_name)
         log.info("CONFIRMED: %s", res)
         dev.leave_app()
@@ -191,9 +207,12 @@ def link(ctx: Context, code: str, *, replace: str | None = None, name: str | Non
 def remove(ctx: Context, name: str) -> None:
     _check_removal(ctx, name)
     with _session(ctx, "REMOVE", f"name='{name}'", notify_ok=True) as dev:
+        ctx.progress("Opening WhatsApp", 0.05)
         flows.open_linked_devices(dev)
+        ctx.progress("Reading the linked devices", 0.4)
         if name not in [d["name"] for d in flows.read_devices(dev)["devices"]]:
             raise Refused(f"no such device: {name}")
+        ctx.progress(f"Removing '{name}'", 0.6)
         flows.remove_device(dev, name, ctx.dry_run)
         dev.leave_app()
 
@@ -201,7 +220,7 @@ def remove(ctx: Context, name: str) -> None:
 def last_message(ctx: Context, chat: str) -> dict:
     """Open `chat` (marks it read) and return its newest message. The content is returned, never logged."""
     with _session(ctx, "LAST", f"chat='{chat}'", notify_ok=True) as dev:
-        msg = flows.last_message(dev, chat)
+        msg = flows.last_message(dev, chat, _part(ctx, 0.05, 0.9))
         log.info("read last message of '%s' (%s, %s)", chat, msg["direction"], msg["kind"])
         dev.leave_app()
         return msg
@@ -209,7 +228,9 @@ def last_message(ctx: Context, chat: str) -> dict:
 
 def keepalive(ctx: Context) -> None:
     with _session(ctx, "KEEPALIVE") as dev:
+        ctx.progress("Restarting WhatsApp", 0.1)
         dev.go_home_and_reset_app()
+        ctx.progress("Keeping WhatsApp online for a moment", 0.6)
         time.sleep(KEEPALIVE_ONLINE_S)
         dev.go_home_screen()
 
@@ -217,5 +238,6 @@ def keepalive(ctx: Context) -> None:
 def reset(ctx: Context) -> None:
     """Force-stop + relaunch WhatsApp, then the launcher (recovery)."""
     with _session(ctx, "RESET") as dev:
+        ctx.progress("Restarting WhatsApp", 0.2)
         dev.go_home_and_reset_app()
         dev.go_home_screen()

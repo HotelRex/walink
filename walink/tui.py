@@ -1,6 +1,9 @@
 """Full-screen terminal UI (Textual). A front end over walink.actions, exactly like the CLI: the same functions,
 the same rules, the same "Are you sure you want to delete <NAME>?" question.
 
+The start screen is a menu; the phone is only touched when an action is chosen. While the phone works a progress
+dialog shows the current step in plain words. Technical log lines appear only with --debug.
+
 Phone actions run in a plain non-daemon thread, one at a time: if the SSH connection drops (SIGHUP) or the UI
 dies, the running action still finishes (and locks the phone) before the process exits."""
 from __future__ import annotations
@@ -10,6 +13,7 @@ import json
 import logging
 import signal
 import threading
+import time
 from typing import Any, Callable
 
 from rich.text import Text
@@ -17,7 +21,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Footer, Input, Label, OptionList, RichLog, Static
+from textual.widgets import Button, DataTable, Footer, Input, Label, OptionList, ProgressBar, RichLog, Static
+from textual.widgets.option_list import Option
 
 from . import actions as walink_actions
 from .code import CodeError, normalize_code
@@ -28,10 +33,19 @@ log = logging.getLogger("walink")
 
 FREE_SLOT = "(free slot)"
 LOCKED = "[locked] "
-CODE_HINT = "Show the code on the computer first; it expires in about a minute."
+CODE_HINT = "Show the code on the computer first (Link with phone number); it expires in about a minute."
 QUIT_QUESTION = "Quit after the current action finishes?"
 # Actions that need the phone: disabled while one is running.
-PHONE_ACTIONS = {"refresh", "link", "delete", "last", "keepalive", "status"}
+PHONE_ACTIONS = {"last", "link", "delete", "devices", "keepalive", "status"}
+MENU = [
+    ("last", "m", "Read the last message of a chat"),
+    ("link", "l", "Link a computer (replace a device or use a free slot)"),
+    ("delete", "d", "Remove a linked device"),
+    ("devices", "r", "Show the linked devices"),
+    ("keepalive", "k", "Keepalive (keeps the account active)"),
+    ("status", "s", "Phone status"),
+    ("quit", "q", "Quit"),
+]
 
 
 def _valid_code(raw: str) -> bool:
@@ -65,6 +79,95 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def action_answer(self, value: bool) -> None:
         self.dismiss(value)
+
+
+class ProgressScreen(ModalScreen):
+    """What the phone is doing right now: a title, a bar, the current step and the elapsed time."""
+    BINDINGS = [("q", "app.quit", "Quit")]
+
+    def __init__(self, title: str):
+        super().__init__()
+        self.title_text = title
+        self.step, self.percent = "Starting", 0
+        self.started = time.monotonic()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Label(self.title_text, classes="question", markup=False)
+            yield ProgressBar(total=100, show_eta=False, id="bar")
+            yield Label(self.step, id="step", markup=False)
+            yield Label("", id="elapsed", classes="hint")
+
+    def on_mount(self) -> None:
+        self._show()
+        self._tick()
+        self.set_interval(1, self._tick)
+
+    def _tick(self) -> None:
+        self.query_one("#elapsed", Label).update(
+            f"{int(time.monotonic() - self.started)} s — the phone is working, please wait")
+
+    def update_step(self, text: str, fraction: float) -> None:
+        """May arrive before the dialog is drawn: keep the latest step and show it on mount."""
+        self.step, self.percent = text, max(self.percent, round(fraction * 100))
+        if self.is_mounted:
+            self._show()
+
+    def _show(self) -> None:
+        self.query_one("#step", Label).update(self.step)
+        self.query_one("#bar", ProgressBar).update(progress=self.percent)
+
+
+class DevicePickScreen(ModalScreen):
+    """The linked devices. mode 'link' / 'remove': pick one (returns the row dict, or FREE_SLOT); 'view': just look."""
+    BINDINGS = [("escape", "cancel", "Back")]
+    TITLES = {"link": "Which device should the new link replace?",
+              "remove": "Which device do you want to remove?",
+              "view": "Linked devices"}
+
+    def __init__(self, info: dict, mode: str):
+        super().__init__()
+        self.info, self.mode = info, mode
+        self.rows: list = list(info["devices"])
+        if mode == "link" and info["count"] < info["max"]:
+            self.rows.append(FREE_SLOT)
+
+    def labels(self) -> list[str]:
+        return [r if r == FREE_SLOT else (LOCKED if r.get("protected") else "") + r["name"] for r in self.rows]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog wide"):
+            yield Label(f"{self.TITLES[self.mode]}  ({self.info['count']} of {self.info['max']} linked)",
+                        classes="question", markup=False)
+            yield DataTable(id="devices", cursor_type="row", zebra_stripes=True)
+            hint = "[locked] devices are protected and cannot be removed or replaced."
+            if self.mode != "view":
+                hint = "Arrows to choose, Enter to select. " + hint
+            yield Static(hint, classes="hint", markup=False)
+            with Horizontal(classes="buttons"):
+                yield Button("Back" if self.mode != "view" else "Close", id="cancel")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#devices", DataTable)
+        table.add_columns("Device", "Status")
+        for label, row in zip(self.labels(), self.rows):
+            table.add_row(Text(label), Text("" if row == FREE_SLOT else row["status"]))   # names are not markup
+        table.focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if self.mode == "view":
+            return
+        row = self.rows[event.cursor_row]
+        if row != FREE_SLOT and row.get("protected"):
+            self.app.notify(f"'{row['name']}' is protected", severity="warning", markup=False)
+            return
+        self.dismiss(row)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class LinkScreen(ModalScreen):
@@ -122,10 +225,11 @@ class LastScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
-            yield Label("Last message of which chat? (opening it marks it as read)", classes="question")
+            yield Label("Last message of which chat?", classes="question")
+            yield Static("Opening the chat marks it as read on the phone.", classes="hint")
             if self.chats:
                 yield OptionList(*self.chats, id="quick")
-            yield Input(placeholder="Exact chat name, as in the chat list", id="chat")
+            yield Input(placeholder="Or type the exact chat name, as in the chat list", id="chat")
             with Horizontal(classes="buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Read", id="read", variant="primary")
@@ -152,15 +256,15 @@ class LastScreen(ModalScreen):
 
 
 class MessageScreen(ModalScreen):
-    """Shows a result until dismissed. Never logged."""
+    """A result or an error, until dismissed. Never logged."""
     BINDINGS = [("escape,enter,q", "close", "Close")]
 
-    def __init__(self, title: str, text: str):
+    def __init__(self, title: str, text: str, error: bool = False):
         super().__init__()
-        self.title_text, self.text = title, text
+        self.title_text, self.text, self.error = title, text, error
 
     def compose(self) -> ComposeResult:
-        with Vertical(classes="dialog"):
+        with Vertical(classes="dialog error" if self.error else "dialog"):
             yield Label(self.title_text, classes="question", markup=False)
             yield Static(self.text, classes="result", markup=False)
             with Horizontal(classes="buttons"):
@@ -177,7 +281,7 @@ class MessageScreen(ModalScreen):
 
 
 class _PaneHandler(logging.Handler):
-    """Mirrors walink log lines into the progress pane, from any thread."""
+    """--debug: mirrors walink log lines into the log pane, from any thread."""
 
     def __init__(self, app: "WalinkApp"):
         super().__init__(logging.INFO)
@@ -186,7 +290,7 @@ class _PaneHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self.app.ui(self.app.write_progress, self.format(record))
+            self.app.ui(self.app.write_log, self.format(record))
         except Exception:
             pass
 
@@ -196,36 +300,42 @@ class WalinkApp(App):
     CSS = """
     #header { height: 1; background: $primary; color: $text; padding: 0 1; }
     #main { height: 1fr; }
-    #devices { width: 1fr; border: round $primary; }
-    #progress { width: 1fr; border: round $secondary; }
+    #menu { width: 1fr; height: auto; max-height: 100%; border: round $primary; margin: 1 2; }
+    #log { width: 1fr; border: round $secondary; }
     ModalScreen { align: center middle; }
-    .dialog { width: 70; max-width: 100%; height: auto; border: thick $primary; background: $surface; padding: 1 2; }
+    .dialog { width: 72; max-width: 100%; height: auto; max-height: 100%; border: thick $primary;
+              background: $surface; padding: 1 2; }
+    .dialog.wide { width: 90; }
+    .dialog.error { border: thick $error; }
     .question { width: 100%; margin-bottom: 1; text-style: bold; }
     .hint { color: $text-muted; margin-bottom: 1; }
     .result { margin-bottom: 1; }
     .buttons { height: auto; align: right middle; }
     .buttons Button { margin-left: 2; }
     #quick { height: auto; max-height: 8; margin-bottom: 1; }
+    #devices { height: auto; max-height: 12; margin-bottom: 1; }
+    #bar { margin-bottom: 1; }
+    #step { margin-bottom: 1; }
     Input { margin-bottom: 1; }
     """
     BINDINGS = [
-        Binding("r", "refresh", "Refresh"),
-        Binding("l", "link", "Link/replace"),
-        Binding("d", "delete", "Delete"),
         Binding("m", "last", "Last message"),
-        Binding("k", "keepalive", "Keepalive"),
-        Binding("s", "status", "Status"),
+        Binding("l", "link", "Link"),
+        Binding("d", "delete", "Remove"),
+        Binding("r", "devices", "Devices"),
+        Binding("k", "keepalive", "Keepalive", show=False),
+        Binding("s", "status", "Status", show=False),
         Binding("q", "quit", "Quit"),
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
     ]
 
     def __init__(self, cfg: dict, label: str, serial: str | None = None, dry_run: bool = False,
-                 actions: Any = walink_actions):
+                 debug: bool = False, actions: Any = walink_actions):
         super().__init__()
-        self.cfg, self.label, self.serial, self.dry_run, self.actions = cfg, label, serial, dry_run, actions
+        self.cfg, self.label, self.serial, self.dry_run, self.debug_mode = cfg, label, serial, dry_run, debug
+        self.actions = actions
         self.busy: str | None = None
-        self.info: dict | None = None
-        self._rows: list[dict] = []                 # parallel to the table rows
+        self._progress: ProgressScreen | None = None
         self._thread: threading.Thread | None = None
         self._quit_after = False
         self._pending_confirm: Callable[[bool], None] | None = None
@@ -235,53 +345,35 @@ class WalinkApp(App):
 
     # ---------- layout ----------
     def compose(self) -> ComposeResult:
-        yield Static(id="header")
+        dry = "   [DRY RUN: nothing is changed]" if self.dry_run else ""
+        yield Static(f"walink — WhatsApp Business linked devices   (key: {self.label}){dry}", id="header",
+                     markup=False)
         with Horizontal(id="main"):
-            yield DataTable(id="devices", cursor_type="row", zebra_stripes=True)
-            yield RichLog(id="progress", wrap=True, markup=False, highlight=False)
+            yield OptionList(*[Option(f"{text}   [{key}]", id=name) for name, key, text in MENU], id="menu")
+            if self.debug_mode:
+                yield RichLog(id="log", wrap=True, markup=False, highlight=False)
         yield Footer()
 
     def on_mount(self) -> None:
         self._event_loop = asyncio.get_running_loop()
         self._main_thread = threading.get_ident()
-        table = self.query_one("#devices", DataTable)
-        table.add_columns("Device", "Status")
-        table.border_title = "Linked devices"
-        self.query_one("#progress", RichLog).border_title = "Progress"
-        log.addHandler(self._handler)
+        self.query_one("#menu", OptionList).border_title = "What do you want to do?"
+        if self.debug_mode:
+            self.query_one("#log", RichLog).border_title = "Log (--debug)"
+            log.addHandler(self._handler)
         if log.level == logging.NOTSET:
             log.setLevel(logging.INFO)
-        self._update_header()
-        self.action_refresh()
+        self.query_one("#menu").focus()
 
     def on_unmount(self) -> None:
         log.removeHandler(self._handler)
 
-    def _update_header(self) -> None:
-        phone = f"busy ({self.busy})" if self.busy else "idle"
-        dry = "   DRY RUN" if self.dry_run else ""
-        self.query_one("#header", Static).update(f"walink — key: {self.label}   phone: {phone}{dry}")
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "menu":
+            self.run_action(event.option.id)
 
-    def write_progress(self, line: str) -> None:
-        self.query_one("#progress", RichLog).write(line)
-
-    def row_labels(self) -> list[str]:
-        return [FREE_SLOT if r is None else (LOCKED if r.get("protected") else "") + r["name"] for r in self._rows]
-
-    def _show_devices(self, info: dict) -> None:
-        self.info = info
-        table = self.query_one("#devices", DataTable)
-        table.clear()
-        self._rows = list(info["devices"]) + ([None] if info["count"] < info["max"] else [])
-        for label, row in zip(self.row_labels(), self._rows):
-            table.add_row(Text(label), Text("" if row is None else row["status"]))   # names are not markup
-        table.border_title = f"Linked devices ({info['count']} of {info['max']})"
-
-    def _selected(self) -> dict | None | bool:
-        """The selected row: a device dict, None for the free slot, False when nothing is loaded."""
-        if not self._rows:
-            return False
-        return self._rows[min(self.query_one("#devices", DataTable).cursor_row, len(self._rows) - 1)]
+    def write_log(self, line: str) -> None:
+        self.query_one("#log", RichLog).write(line)
 
     # ---------- threads ----------
     def ui(self, fn: Callable, *args, **kwargs) -> Any:
@@ -308,48 +400,75 @@ class WalinkApp(App):
         done.wait()
         return answer["value"]
 
+    def _report(self, text: str, fraction: float) -> None:
+        progress = self._progress
+        if progress is not None:
+            self.ui(progress.update_step, text, fraction)
+
     def _action_context(self):
-        return walink_actions.Context(cfg=self.cfg, label=self.label, confirm=self._confirm,
-                                      serial=self.serial, dry_run=self.dry_run)
+        return walink_actions.Context(cfg=self.cfg, label=self.label, confirm=self._confirm, serial=self.serial,
+                                      dry_run=self.dry_run, progress=self._report)
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        return not (self.busy and action in PHONE_ACTIONS)
+        """Phone actions only from the menu: not while the phone works, not from inside a dialog."""
+        if action in PHONE_ACTIONS and (self.busy or isinstance(self.screen, ModalScreen)):
+            return False
+        return True
 
-    def _start(self, name: str, fn: Callable, on_done: Callable | None = None) -> None:
+    def _start(self, name: str, title: str, fn: Callable, on_done: Callable | None = None) -> None:
         if self.busy:
             return
         self.busy = name
-        self._update_header()
         self.refresh_bindings()
-        self.write_progress(f"— {name} —")
+        self._progress = ProgressScreen(title)
+        self.push_screen(self._progress)
         self._thread = threading.Thread(target=self._run_action, args=(fn, on_done), name=f"walink-{name}")
         self._thread.start()
 
     def _run_action(self, fn: Callable, on_done: Callable | None) -> None:
+        outcome: tuple = ("error", "Something went wrong", "")
         try:
-            result = fn(self._action_context())
+            outcome = ("ok", fn(self._action_context()))
         except Busy:
-            self.ui(self.notify, "Phone busy, try again", severity="warning")
+            outcome = ("error", "The phone is busy", "Someone else is using it right now. Try again in a minute.")
         except self.actions.Refused as e:
-            self.ui(self.notify, str(e), severity="warning", markup=False)
+            outcome = ("refused", str(e))
         except self.actions.ActionFailed as e:
-            where = f" (evidence in {e.evidence})" if e.evidence else ""
-            self.ui(self.notify, f"Failed: {e}{where}", severity="error", timeout=15, markup=False)
+            where = f"\n\nDetails were saved in {e.evidence}" if e.evidence else ""
+            outcome = ("error", "Could not finish", f"{e}{where}")
         except Exception as e:
             log.exception("unexpected error")
-            self.ui(self.notify, f"Failed: {e}", severity="error", timeout=15, markup=False)
-        else:
-            if on_done:
-                self.ui(on_done, result)
+            outcome = ("error", "Something went wrong", str(e))
         finally:
-            self.ui(self._finished)
+            self.ui(self._finished, outcome, on_done)
 
-    def _finished(self) -> None:
+    def _close_progress(self) -> None:
+        """Pop the progress dialog and anything still open above it (e.g. an unanswered quit question)."""
+        if self._progress is None:
+            return
+        while self.screen is not self._progress and self._progress in self.screen_stack:
+            self.pop_screen()
+        if self.screen is self._progress:
+            self.pop_screen()
+        self._progress = None
+
+    def _finished(self, outcome: tuple, on_done: Callable | None) -> None:
         self.busy = None
-        self._update_header()
+        self._close_progress()
         self.refresh_bindings()
         if self._quit_after:
             self.exit()
+            return
+        if outcome[0] == "ok":
+            if on_done:
+                on_done(outcome[1])
+        elif outcome[0] == "refused":
+            if outcome[1].startswith("cancelled"):
+                self.notify("Nothing was changed")
+            else:
+                self.push_screen(MessageScreen("Not done", outcome[1], error=True))
+        else:
+            self.push_screen(MessageScreen(outcome[1], outcome[2], error=True))
 
     def join_action(self) -> None:
         """Wait for a running action (used after the UI has stopped)."""
@@ -366,64 +485,60 @@ class WalinkApp(App):
         if not self.busy and self._event_loop:
             self._event_loop.call_soon_threadsafe(self.exit)
 
+    def _done(self, title: str, text: str) -> None:
+        self.push_screen(MessageScreen(title, text))
+
     # ---------- actions ----------
-    def action_refresh(self) -> None:
-        self._start("list", self.actions.list_devices, self._show_devices)
-
-    def action_link(self) -> None:
-        sel = self._selected()
-        if sel is False:
-            self.notify("Load the device list first (r)", severity="warning")
-            return
-        if sel and sel.get("protected"):
-            self.notify(f"'{sel['name']}' is protected", severity="warning", markup=False)
-            return
-        replace = sel["name"] if sel else None
-
-        def go(result) -> None:
-            if result:
-                code, name = result
-                self._start("link", lambda ctx: self.actions.link(ctx, code, replace=replace, name=name),
-                            lambda res: self._linked(replace, res))
-        self.push_screen(LinkScreen(replace), go)
-
-    def _linked(self, replaced: str | None, res: dict) -> None:
-        self.notify(f"Linked '{res['name']}': {res['status']}", markup=False)
-        if self.info and not self.dry_run:
-            devices = [d for d in self.info["devices"] if d["name"] != replaced]
-            devices.append({**res, "protected": False})
-            self._show_devices({**self.info, "count": len(devices), "devices": devices})
-
-    def action_delete(self) -> None:
-        sel = self._selected()
-        if not sel:
-            self.notify("Select a device first", severity="warning")
-            return
-        if sel.get("protected"):
-            self.notify(f"'{sel['name']}' is protected", severity="warning", markup=False)
-            return
-        name = sel["name"]
-        self._start("remove", lambda ctx: self.actions.remove(ctx, name), lambda _: self._removed(name))
-
-    def _removed(self, name: str) -> None:
-        self.notify(f"{'[dry-run] would remove' if self.dry_run else 'Removed'} '{name}'", markup=False)
-        if self.info and not self.dry_run:
-            devices = [d for d in self.info["devices"] if d["name"] != name]
-            self._show_devices({**self.info, "count": len(devices), "devices": devices})
-
     def action_last(self) -> None:
         def go(chat) -> None:
             if chat:
-                self._start("last", lambda ctx: self.actions.last_message(ctx, chat),
-                            lambda msg: self.push_screen(MessageScreen(f"Last message — {chat}", format_message(msg))))
+                self._start("last", f"Reading the last message of '{chat}'",
+                            lambda ctx: self.actions.last_message(ctx, chat),
+                            lambda msg: self._done(f"Last message — {chat}", format_message(msg)))
         self.push_screen(LastScreen(self.actions.quick_chats(self.cfg)), go)
 
+    def _with_devices(self, mode: str, then: Callable[[Any], None] | None) -> None:
+        """Read the device list (progress dialog), then let the user pick (or just look)."""
+        def picked(info: dict) -> None:
+            self.push_screen(DevicePickScreen(info, mode), then)
+        self._start("devices", "Reading the linked devices", self.actions.list_devices, picked)
+
+    def action_devices(self) -> None:
+        self._with_devices("view", None)
+
+    def action_link(self) -> None:
+        def chosen(row) -> None:
+            if row is None:
+                return
+            replace = None if row == FREE_SLOT else row["name"]
+
+            def go(result) -> None:
+                if result:
+                    code, name = result
+                    title = f"Replacing '{replace}' with '{name}'" if replace else f"Linking '{name}'"
+                    self._start("link", title,
+                                lambda ctx: self.actions.link(ctx, code, replace=replace, name=name),
+                                lambda res: self._done("Done", f"'{res['name']}' is linked ({res['status']})."))
+            self.push_screen(LinkScreen(replace), go)
+        self._with_devices("link", chosen)
+
+    def action_delete(self) -> None:
+        def chosen(row) -> None:
+            if row is None:
+                return
+            name = row["name"]
+            what = "[dry-run] would remove" if self.dry_run else "Removed"
+            self._start("remove", f"Removing '{name}'", lambda ctx: self.actions.remove(ctx, name),
+                        lambda _: self._done("Done", f"{what} '{name}'."))
+        self._with_devices("remove", chosen)
+
     def action_keepalive(self) -> None:
-        self._start("keepalive", self.actions.keepalive, lambda _: self.notify("Keepalive done"))
+        self._start("keepalive", "Keepalive", self.actions.keepalive,
+                    lambda _: self._done("Done", "WhatsApp was opened and is active."))
 
     def action_status(self) -> None:
-        self._start("status", self.actions.status,
-                    lambda info: self.push_screen(MessageScreen("Phone status", json.dumps(info, indent=2))))
+        self._start("status", "Reading the phone status", self.actions.status,
+                    lambda info: self._done("Phone status", json.dumps(info, indent=2)))
 
     async def action_quit(self) -> None:
         if not self.busy:
@@ -437,13 +552,13 @@ class WalinkApp(App):
         self.push_screen(ConfirmScreen(QUIT_QUESTION), answer)
 
 
-def run(cfg: dict, label: str, serial: str | None = None, dry_run: bool = False) -> int:
-    # Log lines on stderr would draw over the screen; the progress pane and per-run file logs take over.
+def run(cfg: dict, label: str, serial: str | None = None, dry_run: bool = False, debug: bool = False) -> int:
+    # Log lines on stderr would draw over the screen; the per-run file logs (and --debug's pane) take over.
     for handler in list(log.handlers):
         if type(handler) is logging.StreamHandler:
             log.removeHandler(handler)
     log.setLevel(logging.INFO)
-    app = WalinkApp(cfg, label, serial=serial, dry_run=dry_run)
+    app = WalinkApp(cfg, label, serial=serial, dry_run=dry_run, debug=debug)
     previous = None
     if hasattr(signal, "SIGHUP"):
         previous = signal.signal(signal.SIGHUP, lambda signum, frame: app.hangup())

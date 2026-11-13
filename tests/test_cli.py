@@ -109,9 +109,24 @@ def test_no_args_without_tty_prints_help(calls, monkeypatch, capsys):
 def test_no_args_with_tty_starts_tui(calls, monkeypatch):
     import types
     seen = {}
-    fake_tui = types.SimpleNamespace(run=lambda cfg, label, serial=None, dry_run=False: seen.update(
-        label=label, dry_run=dry_run) or 0)
+    fake_tui = types.SimpleNamespace(run=lambda cfg, label, serial=None, dry_run=False, debug=False: seen.update(
+        label=label, dry_run=dry_run, debug=debug) or 0)
     monkeypatch.setitem(sys.modules, "walink.tui", fake_tui)
     monkeypatch.setattr(cli, "_interactive", lambda: True)
-    assert cli.main(["--dry-run"], label="pc") == 0
-    assert seen == {"label": "pc", "dry_run": True}
+    assert cli.main(["--dry-run", "--debug"], label="pc") == 0
+    assert seen == {"label": "pc", "dry_run": True, "debug": True}
+
+
+def test_steps_on_stderr_logs_only_with_debug(calls, monkeypatch, capsys):
+    import logging
+
+    def list_devices(ctx):
+        ctx.progress("Opening WhatsApp", 0.05)
+        logging.getLogger("walink").info("tap {'resourceId': 'x'}")
+        return DEVICES
+    monkeypatch.setattr(actions, "list_devices", list_devices)
+    cli.main(["list"])
+    err = capsys.readouterr().err
+    assert "  5% Opening WhatsApp" in err and "tap {" not in err
+    cli.main(["--debug", "list"])
+    assert "tap {" in capsys.readouterr().err

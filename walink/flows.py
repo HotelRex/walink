@@ -3,12 +3,21 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Callable
 
 from . import selectors as S
 from .device import Device, DeviceError
 from .messages import last_message as parse_last_message
 
 log = logging.getLogger("walink")
+
+# progress(step_text, fraction 0..1 of this flow); the caller scales it into its own progress bar
+Progress = Callable[[str, float], None]
+
+
+def _no_progress(text: str, fraction: float) -> None:
+    pass
+
 
 HEADER_RE = re.compile(r"(\d+) of (\d+)")
 DEFAULT_MAX_DEVICES = 4
@@ -26,7 +35,7 @@ def open_linked_devices(dev: Device) -> None:
     dev.text(S.HEADER_COUNT)
 
 
-def read_devices(dev: Device, max_scrolls: int = 2) -> dict:
+def read_devices(dev: Device, max_scrolls: int = 6) -> dict:
     """Returns {'count': n, 'max': m, 'devices': [{'name','status'}]}. Scrolls (at most `max_scrolls`
     times) until it has read as many rows as the header announces."""
     m = HEADER_RE.search(dev.text(S.HEADER_COUNT))
@@ -76,9 +85,10 @@ def remove_device(dev: Device, name: str, dry_run: bool = False) -> None:
     log.info("removed '%s'", name)
 
 
-def link_with_code(dev: Device, code: str, new_name: str) -> None:
+def link_with_code(dev: Device, code: str, new_name: str, progress: Progress = _no_progress) -> None:
     """From Linked devices: link a new device and name it. Needs a free slot.
     `code` must already be normalized (walink.code.normalize_code)."""
+    progress("Opening the code screen", 0.0)
     dev.tap(S.LINK_BUTTON)
     seen = dev.wait_any({"scanner": {"resourceId": S.SCANNER_PHONE_NUMBER["resourceId"]},
                          "full": {"resourceId": S.DIALOG_MESSAGE["resourceId"]}}, timeout=15)
@@ -86,10 +96,12 @@ def link_with_code(dev: Device, code: str, new_name: str) -> None:
         raise FlowError("list is full (Meta One dialog); remove a device first")
     dev.tap(S.SCANNER_PHONE_NUMBER)
     dev.wait_activity(S.ACT_CODE)
+    progress("Entering the code", 0.25)
     boxes = [S.code_box(i) for i in range(1, 9)]
     dev.type_into_boxes(boxes, code)               # boxes 1-7, verified by readback
     dev.type_last_box(boxes, code[-1], code[-2])   # 8th box submits
     log.info("code submitted, waiting for result")
+    progress("Waiting for WhatsApp to accept the code", 0.45)
     result = dev.wait_any({"name": S.NAME_FIELD,
                            "dialog": S.DIALOG_TITLE}, timeout=45)
     if result == "dialog":
@@ -97,6 +109,7 @@ def link_with_code(dev: Device, code: str, new_name: str) -> None:
         msg = dev.text(S.DIALOG_MESSAGE)
         raise FlowError(f"code rejected: {title}: {msg}")
     dev.wait_activity(S.ACT_NAME)
+    progress(f"Naming the device '{new_name}'", 0.8)
     dev.type_into_field(S.NAME_FIELD, new_name)
     dev.tap(S.NAME_SAVE)
     dev.wait_activity(S.ACT_LINKED, timeout=30)
@@ -111,15 +124,18 @@ def verify_linked(dev: Device, name: str) -> dict:
     return match[0]
 
 
-def open_chat(dev: Device, name: str) -> None:
+def open_chat(dev: Device, name: str, progress: Progress = _no_progress) -> None:
     """From the chat list: search the chat by exact name, open it, verify the title, jump to the newest message.
     Opening a chat marks it as read (blue ticks are sent)."""
+    progress("Opening WhatsApp", 0.0)
     dev.open_app_home()
+    progress(f"Searching for the chat '{name}'", 0.4)
     dev.tap(S.SEARCH_BAR)
     dev.type_into_field(S.SEARCH_INPUT, name, tap_first=False)   # tapping the bar focuses the input
     row = {"resourceId": S.CHAT_ROW_NAME_ID, "text": name}
     if not dev.exists(row, timeout=8):
         raise FlowError(f"no chat named exactly '{name}'")
+    progress("Opening the chat", 0.7)
     dev.tap(row)
     dev.wait_activity(S.ACT_CHAT)
     shown = dev.text(S.CHAT_HEADER_NAME)
@@ -130,9 +146,10 @@ def open_chat(dev: Device, name: str) -> None:
         dev.wait_gone(S.CHAT_SCROLL_BOTTOM, timeout=10)
 
 
-def last_message(dev: Device, name: str) -> dict:
+def last_message(dev: Device, name: str, progress: Progress = _no_progress) -> dict:
     """Open the chat `name` and return its newest message (see walink.messages.last_message)."""
-    open_chat(dev, name)
+    open_chat(dev, name, progress)
+    progress("Reading the newest message", 0.9)
     try:
         msg = parse_last_message(dev.hierarchy())
     except ValueError as e:

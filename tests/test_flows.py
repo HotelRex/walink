@@ -55,3 +55,11 @@ def test_unparsable_header_uses_what_was_read():
     dev = ScrollingList("something new", [rows(("A", "x"))])
     info = flows.read_devices(dev)
     assert (info["count"], info["max"]) == (1, flows.DEFAULT_MAX_DEVICES)
+
+
+def test_landscape_needs_more_scrolls_and_still_reads_everything():
+    # landscape: one device per screen
+    dev = ScrollingList("4 of 4 devices linked.", [rows(("A", "x")), rows(("B", "x")), rows(("C", "x")),
+                                                   rows(("D", "x"))])
+    assert [d["name"] for d in flows.read_devices(dev)["devices"]] == ["A", "B", "C", "D"]
+    assert dev.scrolls == 3
