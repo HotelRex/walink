@@ -20,6 +20,9 @@ from .humanize import Pacer
 log = logging.getLogger("walink")
 
 ADB_TIMEOUT_S = 60
+# Before tapping, an element must be at the same place in two lookups in a row (each lookup takes ~250 ms).
+SETTLE_STEP_S = 0.05
+SETTLE_TIMEOUT_S = 3
 
 # Swipes as fractions of the screen size (x, y_from, y_to), so they fit any resolution.
 # On the 720x1600 Huawei: scroll 1280->720, unlock 1280->400.
@@ -155,16 +158,32 @@ class Device:
             self._d.press(kc)
 
     def tap(self, sel: dict, timeout: float = 10) -> None:
-        """Find once, pause like a human, then tap a slightly random point inside the element
-        (a finger never hits the exact centre; also saves a second lookup)."""
+        """Find the element, wait until it stops moving, pause like a human, then tap a slightly random point
+        inside it (a finger never hits the exact centre). The lookups count toward the pause."""
         t0 = time.perf_counter()
-        info = self._find(sel, timeout)
-        if info is None:
-            raise DeviceError(f"cannot tap, not found: {sel}")
-        x, y = self._jitter(info.get("visibleBounds") or info["bounds"])
+        x, y = self._jitter(self._settled_bounds(sel, timeout))
         self.pacer.click_pause(already_ms=(time.perf_counter() - t0) * 1000)
         log.info("tap %s", sel)
         self._d.click(x, y)
+
+    def _settled_bounds(self, sel: dict, timeout: float) -> dict:
+        """Bounds once two lookups in a row agree. Menus animate in: the overflow menu unfolds from the bottom
+        and items appear above "Linked devices" for ~300 ms, so a position read too early is one row off."""
+        def bounds_now(wait: float) -> dict:
+            info = self._find(sel, wait)
+            if info is None:
+                raise DeviceError(f"cannot tap, not found: {sel}")
+            return info.get("visibleBounds") or info["bounds"]
+        prev = bounds_now(timeout)
+        end = time.time() + SETTLE_TIMEOUT_S
+        while True:
+            time.sleep(SETTLE_STEP_S)
+            cur = bounds_now(SETTLE_TIMEOUT_S)
+            if cur == prev:
+                return cur
+            if time.time() > end:
+                raise DeviceError(f"cannot tap, still moving after {SETTLE_TIMEOUT_S}s: {sel}")
+            prev = cur
 
     def _jitter(self, b: dict) -> tuple[int, int]:
         """Point near the centre, normal spread, kept inside the middle 60% of the element."""
