@@ -59,8 +59,9 @@ def _valid_code(raw: str) -> bool:
 
 
 class ConfirmScreen(ModalScreen[bool]):
-    """Yes/No question. Focus starts on No, so Enter alone never confirms."""
-    BINDINGS = [("y", "answer(True)", "Yes"), ("n,escape", "answer(False)", "No")]
+    """Yes/No question. Focus starts on No, so Enter alone never confirms. Arrows move between the buttons."""
+    BINDINGS = [("y", "answer(True)", "Yes"), ("n,escape", "answer(False)", "No"),
+                Binding("left,up", "choose('no')", show=False), Binding("right,down", "choose('yes')", show=False)]
 
     def __init__(self, question: str):
         super().__init__()
@@ -81,6 +82,9 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def action_answer(self, value: bool) -> None:
         self.dismiss(value)
+
+    def action_choose(self, button_id: str) -> None:
+        self.query_one(f"#{button_id}").focus()
 
 
 class ProgressScreen(ModalScreen):
@@ -371,6 +375,8 @@ class WalinkApp(App):
 
     def on_unmount(self) -> None:
         log.removeHandler(self._handler)
+        if self._pending_confirm:              # the UI is gone: an unanswered question means No
+            self._pending_confirm(False)
 
     async def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id == "menu":

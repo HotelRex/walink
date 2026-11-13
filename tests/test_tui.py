@@ -345,3 +345,43 @@ def test_enter_on_quit_item_exits():
             await pilot.press("end", "enter")                       # last item: Quit
             await wait_for(pilot, lambda: exits, "exit")
     run(go())
+
+
+def test_arrows_move_between_no_and_yes():
+    async def go():
+        app, fake, _ = make_app()
+        async with app.run_test(size=(110, 32)) as pilot:
+            await pilot.press("d")
+            await wait_screen(pilot, app, "DevicePickScreen")
+            await pilot.press("down", "down", "enter")           # Sara
+            await wait_screen(pilot, app, "ConfirmScreen")
+            confirm = app.screen
+            assert app.focused.id == "no"
+            await pilot.press("right")
+            assert app.focused.id == "yes"
+            await pilot.press("left")
+            assert app.focused.id == "no"
+            await pilot.press("down")
+            assert app.focused.id == "yes"
+            await pilot.press("up")
+            assert app.focused.id == "no"
+            await pilot.press("right", "right")                  # stays on Yes, no wrap-around
+            assert app.focused.id == "yes"
+            await pilot.press("enter")
+            await wait_screen(pilot, app, "MessageScreen")
+            assert ("remove", "Sara") in fake.calls and confirm.is_attached is False
+    run(go())
+
+
+def test_closing_the_app_during_a_question_answers_no():
+    async def go():
+        app, fake, _ = make_app()
+        async with app.run_test(size=(110, 32)) as pilot:
+            await pilot.press("d")
+            await wait_screen(pilot, app, "DevicePickScreen")
+            await pilot.press("down", "down", "enter")
+            await wait_screen(pilot, app, "ConfirmScreen")
+        # the app is closed with the question still open
+        app._thread.join(5)
+        assert not app._thread.is_alive()
+    run(go())
