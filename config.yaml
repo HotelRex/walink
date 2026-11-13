@@ -3,8 +3,11 @@
 # Turn the screen off (locks the phone) at the end of every command except status.
 lock_screen_when_done: true
 
-# Never removed by any command, local or remote.
+# Never removed or replaced by any command (CLI, TUI or SSH).
 protected_devices: ["Test"]
+
+# Chats offered as quick picks for "last message" in the TUI (a helper; any chat can be read).
+quick_chats: []                # e.g. ["PayPal"]
 
 # Human-like input timing in ms, [min, max], drawn from a normal distribution.
 timing:
@@ -12,10 +15,7 @@ timing:
   switch_type_ms: [130, 320]   # letter<->digit
   click_ms: [300, 650]         # layout taps
 
-# Settings for the SSH-triggered wrapper (walink_remote.py) only.
+# SSH forced command (walink_remote.py) and notifications.
 remote:
-  allowed_names: ["Hotel Rex"] # the ONLY device names a remote caller may replace
-  readable_chats: []           # the ONLY chats whose last message a remote caller may read (exact names), e.g. ["PayPal"]
-  max_attempts_per_hour: 6     # counted per key label, successful or not (relink and last together)
-  timeout_s: 240
+  timeout_s: 240               # a one-shot SSH command is stopped (and the phone reset) after this
   # notify_cmd: "ntfy publish walink"   # optional; gets a one-line message on stdin (never message content)

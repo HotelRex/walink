@@ -1,113 +1,117 @@
-"""CLI orchestration with a fake phone: guards, remove-then-link order, failure recovery, clean stdout."""
+"""The CLI is a thin front end over walink.actions: parsing, confirmation, rendering, exit codes."""
+import io
 import json
-import logging
+import sys
 
 import pytest
 
-from walink import cli, flows, lock, paths
+from walink import actions, cli, lock
+
+DEVICES = {"count": 2, "max": 4, "devices": [{"name": "Hotel Rex", "status": "Active now", "protected": False},
+                                             {"name": "Test", "status": "x", "protected": True}]}
 
 
-class FakeDevice:
-    def __init__(self, serial=None, pacer=None):
-        self.calls = []
-
-    def __getattr__(self, name):            # every phone action is recorded and does nothing
-        def record(*args, **kwargs):
-            self.calls.append(name)
-        return record
-
-
-DEVICES = {"count": 4, "max": 4, "devices": [{"name": n, "status": "Active now"}
-                                             for n in ("Hotel Rex", "Test", "A", "B")]}
+class Tty(io.StringIO):
+    def isatty(self):
+        return True
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch):
-    """Fake phone + recorded flow calls; logs in tmp; no real lock or config."""
-    monkeypatch.setattr(paths, "LOGS", tmp_path / "logs")
-    monkeypatch.setattr(lock, "acquire", lambda: None)
+def calls(monkeypatch):
+    calls = []
     monkeypatch.setattr(cli, "load_config", lambda: {"protected_devices": ["Test"]})
-    devs = []
 
-    def make_device(*a, **k):
-        devs.append(FakeDevice())
-        return devs[-1]
-    monkeypatch.setattr(cli, "Device", make_device)
-    order = []
-
-    def rec(name, result=None):
-        def f(*a, **k):
-            order.append((name, a[1:]))
+    def fake(name, result=None):
+        def f(ctx, *a, **k):
+            calls.append((name, ctx, a, k))
+            if name in ("remove", "link") and not ctx.dry_run:
+                if not ctx.confirm(actions.CONFIRM_TEXT.format(name=a[0] if name == "remove" else k["replace"])):
+                    raise actions.Refused("cancelled: nothing was removed")
             return result
         return f
-    monkeypatch.setattr(flows, "open_linked_devices", rec("open"))
-    monkeypatch.setattr(flows, "read_devices", rec("read", DEVICES))
-    monkeypatch.setattr(flows, "remove_device", rec("remove"))
-    monkeypatch.setattr(flows, "link_with_code", rec("link"))
-    monkeypatch.setattr(flows, "verify_linked", rec("verify", {"name": "Hotel Rex", "status": "Active now"}))
-    yield order, devs
-    for h in list(logging.getLogger("walink").handlers):
-        h.close()
+    monkeypatch.setattr(actions, "list_devices", fake("list", DEVICES))
+    monkeypatch.setattr(actions, "remove", fake("remove"))
+    monkeypatch.setattr(actions, "link", fake("link", {"name": "Hotel Rex", "status": "Active now"}))
+    monkeypatch.setattr(actions, "status", fake("status", {"model": "x"}))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))          # not a tty unless a test says so
+    return calls
 
 
-def test_link_removes_first_then_links_normalized_code(env):
-    order, devs = env
-    assert cli.main(["link", "abcd-efgh", "--replace", "Hotel Rex", "--confirm-remove", "Hotel Rex"]) == 0
-    assert [o[0] for o in order] == ["open", "read", "remove", "link", "verify"]
-    assert order[3][1] == ("ABCDEFGH", "Hotel Rex")
-    assert devs[0].calls[-2:] == ["leave_app", "lock_screen"]
+def test_unlink_yes_skips_prompt(calls):
+    assert cli.main(["unlink", "Sara", "--yes"]) == 0
+    assert calls[0][0] == "remove" and calls[0][2] == ("Sara",)
 
 
-@pytest.mark.parametrize("argv", [
-    ["link", "ABCDEFGH", "--replace", "Test", "--confirm-remove", "Test"],      # protected
-    ["link", "ABCDEFGH", "--replace", "Hotel Rex"],                             # no confirmation
-    ["link", "ABCDEFGH", "--replace", "Hotel Rex", "--confirm-remove", "Hotel"],  # wrong confirmation
-    ["unlink", "Test", "--confirm-remove", "Test"],
-    ["link", "ABCDEFGH", "--replace", "Nope", "--confirm-remove", "Nope"],      # not in the list
-    ["link", "ABCDEFGH", "--name", "New"],                                      # list full, no replace
-])
-def test_refusals_never_remove(env, argv):
-    order, devs = env
-    assert cli.main(argv) == 2
-    assert "remove" not in [o[0] for o in order]
-    assert "go_home_and_reset_app" in devs[0].calls and devs[0].calls[-1] == "lock_screen"
+def test_unlink_non_tty_without_yes_refused(calls, capsys):
+    assert cli.main(["unlink", "Sara"]) == 4
+    assert "pass --yes" in capsys.readouterr().err
 
 
-def test_dry_run_removes_nothing_for_real(env):
-    order, _ = env
-    assert cli.main(["--dry-run", "link", "ABCDEFGH", "--replace", "Hotel Rex"]) == 0
-    assert ("remove", ("Hotel Rex", True)) in order
-    assert "link" not in [o[0] for o in order]
+def test_unlink_tty_asks(calls, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", Tty("y\n"))
+    assert cli.main(["unlink", "Sara"]) == 0
+    assert "Are you sure you want to delete Sara? [y/N]" in capsys.readouterr().out
+    monkeypatch.setattr(sys, "stdin", Tty("\n"))
+    assert cli.main(["unlink", "Sara"]) == 4
 
 
-def test_unexpected_error_still_saves_evidence_resets_and_locks(env, monkeypatch, capsys):
-    _, devs = env
+def test_link_replace_and_name_passed_through(calls):
+    assert cli.main(["link", "abcd-efgh", "--replace", "Hotel Rex", "--yes"]) == 0
+    assert calls[0][2] == ("abcd-efgh",) and calls[0][3] == {"replace": "Hotel Rex", "name": None}
 
-    def boom(*a, **k):
-        raise KeyError("surprise")
-    monkeypatch.setattr(flows, "read_devices", boom)
+
+def test_confirm_remove_flag_errors(calls, capsys):
+    assert cli.main(["link", "ABCDEFGH", "--replace", "A", "--confirm-remove", "A"]) == 2
+    assert "--yes" in capsys.readouterr().err and calls == []
+
+
+@pytest.mark.parametrize("exc,code", [(actions.Refused("no"), 4), (lock.Busy("in use"), 5),
+                                      (actions.ActionFailed("boom", None), 2)])
+def test_exit_codes(calls, monkeypatch, exc, code):
+    def raise_(ctx):
+        raise exc
+    monkeypatch.setattr(actions, "list_devices", raise_)
+    assert cli.main(["list"]) == code
+
+
+def test_failure_mentions_evidence(calls, monkeypatch, capsys, tmp_path):
+    def raise_(ctx):
+        raise actions.ActionFailed("boom", tmp_path)
+    monkeypatch.setattr(actions, "list_devices", raise_)
     assert cli.main(["list"]) == 2
-    assert devs[0].calls[-3:] == ["save_evidence", "go_home_and_reset_app", "lock_screen"]
-    assert "surprise" in capsys.readouterr().err
+    assert str(tmp_path) in capsys.readouterr().err
 
 
-def test_list_json_stdout_is_pure_json(env, capsys):
+def test_list_json_stdout_is_pure_json(calls, capsys):
     assert cli.main(["list", "--json"]) == 0
-    out = capsys.readouterr()
-    assert json.loads(out.out) == DEVICES          # logs did not leak into stdout
-    assert "INFO" not in out.out
+    assert json.loads(capsys.readouterr().out) == DEVICES
 
 
-def test_busy_reports_no_evidence(env, monkeypatch, capsys):
-    def busy():
-        raise lock.Busy("the phone is in use")
-    monkeypatch.setattr(lock, "acquire", busy)
-    assert cli.main(["list"]) == 2
-    err = capsys.readouterr().err
-    assert "in use" in err and "evidence" not in err
+def test_list_text_marks_locked(calls, capsys):
+    cli.main(["list"])
+    assert "- [locked] Test: x" in capsys.readouterr().out
 
 
-def test_bad_timing_config_fails_cleanly(env, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "load_config", lambda: {"timing": {"click_ms": [650, 300]}})
-    assert cli.main(["list"]) == 2
-    assert "click_ms" in capsys.readouterr().err
+def test_dry_run_and_label_reach_context(calls, monkeypatch):
+    monkeypatch.setenv("WALINK_AUDIT_LABEL", "pc")
+    cli.main(["--dry-run", "list"])
+    assert calls[0][1].dry_run and calls[0][1].label == "pc"
+    cli.main(["list"], label="other")
+    assert calls[1][1].label == "other"
+
+
+def test_no_args_without_tty_prints_help(calls, monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "walink.tui", None)        # importing it would fail
+    assert cli.main([]) == 2
+    assert "usage" in capsys.readouterr().err
+
+
+def test_no_args_with_tty_starts_tui(calls, monkeypatch):
+    import types
+    seen = {}
+    fake_tui = types.SimpleNamespace(run=lambda cfg, label, serial=None, dry_run=False: seen.update(
+        label=label, dry_run=dry_run) or 0)
+    monkeypatch.setitem(sys.modules, "walink.tui", fake_tui)
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    assert cli.main(["--dry-run"], label="pc") == 0
+    assert seen == {"label": "pc", "dry_run": True}

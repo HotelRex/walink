@@ -18,10 +18,9 @@ import time
 from walink import lock, paths
 from walink.config import ConfigError, load_config
 from walink.messages import format_message
-from walink.remote import parse_request, check_rate, Rejected, LABEL_RE
+from walink.remote import parse_request, Rejected, LABEL_RE
 
 AUDIT_LOG = paths.LOGS / "remote-audit.log"
-RATE_STATE = paths.STATE / "remote-rate.json"
 NOTIFY_TIMEOUT_S = 20
 RESET_TIMEOUT_S = 90
 EXIT_FAILED, EXIT_MISCONFIGURED, EXIT_REJECTED, EXIT_BUSY = 2, 3, 4, 5
@@ -71,11 +70,7 @@ def _recover_after_timeout(cfg: dict, label: str) -> None:
 
 
 def _lock_then_rate(cfg: dict, label: str):
-    """Take the phone lock, THEN count the attempt: the rate file is only touched under the lock,
-    so concurrent requests cannot race on it. A 'busy' answer does nothing and is not counted."""
-    held = lock.acquire()          # raises lock.Busy
-    check_rate(RATE_STATE, label, cfg.get("max_attempts_per_hour", 6))
-    return held
+    return lock.acquire()          # raises lock.Busy
 
 
 def do_relink(cfg_all: dict, cfg: dict, label: str, name: str, code: str) -> int:

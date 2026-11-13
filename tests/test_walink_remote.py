@@ -12,7 +12,6 @@ from walink import lock
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(wr, "AUDIT_LOG", tmp_path / "logs" / "remote-audit.log")
-    monkeypatch.setattr(wr, "RATE_STATE", tmp_path / "state" / "remote-rate.json")
     monkeypatch.setattr(lock, "LOCK_PATH", tmp_path / "state" / "phone.lock")
     monkeypatch.delenv("WALINK_LOCK_HELD", raising=False)
     calls = []
@@ -40,22 +39,6 @@ def test_relink_protected_never_runs(env):
     with pytest.raises(wr.Rejected):
         wr.do_relink({"protected_devices": ["Test"]}, CFG, "pc", "Test", "ABCDEFGH")
     assert env.calls == []
-
-
-def test_busy_is_not_counted_against_the_rate_limit(env):
-    held = lock.acquire()
-    with pytest.raises(lock.Busy):
-        wr.do_relink({}, CFG, "pc", "Hotel Rex", "ABCDEFGH")
-    held.close()
-    assert not env.rate.exists() and env.calls == []
-
-
-def test_rate_limit_applies(env):
-    for _ in range(2):
-        wr.do_relink({}, CFG, "pc", "Hotel Rex", "ABCDEFGH")
-    with pytest.raises(wr.Rejected):
-        wr.do_relink({}, CFG, "pc", "Hotel Rex", "ABCDEFGH")
-    assert len(env.calls) == 2
 
 
 def test_timeout_triggers_reset(env, capsys):
