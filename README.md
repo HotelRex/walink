@@ -169,6 +169,31 @@ The code is cross-platform (adb, uiautomator2, the phone lock and the SSH wrappe
    `notify_cmd` runs through `cmd.exe` on Windows. All text I/O is UTF-8 (emoji and accented chat names are fine).
 7. Run the tests there: `.venv\Scripts\python -m pytest -q tests`, then `walink.py list` and a `last` on the phone.
 
+## Running the controller in WSL2 on Windows
+An alternative to the native Windows setup: the Linux instructions above apply unchanged inside WSL2, plus three extra
+pieces (USB passthrough, keeping WSL alive, inbound SSH). **Not yet tested on a real controller.**
+1. **USB (usbipd-win).** WSL2 cannot see USB devices by itself. Install [usbipd-win](https://github.com/dorssel/usbipd-win), then:
+   ```powershell
+   usbipd list                                     # find the phone's BUSID
+   usbipd bind --busid 2-3                         # once, as admin
+   usbipd attach --wsl --busid 2-3 --auto-attach   # stays in the foreground; re-attaches after replug/reboot
+   ```
+   Run the `attach` line as a startup task so it survives reboots. Inside WSL, install platform-tools and check
+   `adb devices`. Only one adb may own the phone: no adb server on the Windows side (Android Studio, HiSuite).
+   Wi-Fi ADB (`adb connect PHONE_IP:5555` from WSL) avoids usbipd, but the phone forgets tcpip mode on reboot.
+2. **Keep WSL running.** WSL stops a distro shortly after its last process exits, so cron and sshd inside it would stop too.
+   Enable systemd in `/etc/wsl.conf` (`[boot]` / `systemd=true`), then add a Task Scheduler task, "at startup",
+   "whether user is logged on or not", that runs `wsl.exe -d Ubuntu -- sleep infinity`. Keepalive then uses cron or a
+   systemd timer inside WSL as on Linux. The Windows power and Windows Update notes above still apply.
+3. **Inbound SSH.** WSL2 is behind NAT by default. On Windows 11 set this in `%USERPROFILE%\.wslconfig`, then run `wsl --shutdown`:
+   ```ini
+   [wsl2]
+   networkingMode=mirrored
+   ```
+   Run sshd inside WSL and set it up as in "Remote access over SSH". If Windows OpenSSH also runs, give the WSL sshd
+   another port. Allow that port in the Windows firewall, then in the `windows/` scripts point `$Server` at the Windows host and add `-p PORT` to the `ssh` line.
+4. Keep the checkout in the WSL filesystem (`~/whatsapp-pair`), not under `/mnt/c`, which is slow and has loose permissions.
+
 ## When WhatsApp changes its UI
 1. Run `python walink.py list` (or the failing command). The failure folder has `screen.png` and `hierarchy.xml`.
 2. Find the new resource-id / text in `hierarchy.xml` and edit **`walink/selectors.py`** (all selectors live there; prefer resource-id, then content-desc, then text).
