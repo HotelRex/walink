@@ -1,0 +1,21 @@
+# serial: YOUR_SERIAL          # only needed if more than one adb device is attached
+
+# Turn the screen off (locks the phone) at the end of every command except status.
+lock_screen_when_done: true
+
+# Never removed by any command, local or remote.
+protected_devices: ["Test"]
+
+# Human-like input timing in ms, [min, max], drawn from a normal distribution.
+timing:
+  same_type_ms: [70, 200]      # char->char, digit->digit
+  switch_type_ms: [130, 320]   # letter<->digit
+  click_ms: [300, 650]         # layout taps
+
+# Settings for the SSH-triggered wrapper (walink_remote.py) only.
+remote:
+  allowed_names: ["Hotel Rex"] # the ONLY device names a remote caller may replace
+  readable_chats: []           # the ONLY chats whose last message a remote caller may read (exact names), e.g. ["PayPal"]
+  max_attempts_per_hour: 6     # counted per key label, successful or not (relink and last together)
+  timeout_s: 240
+  # notify_cmd: "ntfy publish walink"   # optional; gets a one-line message on stdin (never message content)

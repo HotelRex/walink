@@ -1,0 +1,11 @@
+# runtime data (sensitive / machine-local)
+logs/
+state/
+# exploration material and local reports, not part of the code
+exploration/
+REPORT.md
+# environment and caches
+.venv/
+__pycache__/
+.pytest_cache/
+*.tar.gz

@@ -1,0 +1,140 @@
+"""Business flows. Only uses walink.device.Device, never uiautomator2/adb directly."""
+from __future__ import annotations
+
+import logging
+import re
+
+from . import selectors as S
+from .device import Device, DeviceError
+from .messages import last_message as parse_last_message
+
+log = logging.getLogger("walink")
+
+HEADER_RE = re.compile(r"(\d+) of (\d+)")
+DEFAULT_MAX_DEVICES = 4
+
+
+class FlowError(DeviceError):
+    pass
+
+
+def open_linked_devices(dev: Device) -> None:
+    dev.open_app_home()
+    dev.tap(S.OVERFLOW)
+    dev.tap(S.MENU_LINKED_DEVICES)
+    dev.wait_activity(S.ACT_LINKED)
+    dev.text(S.HEADER_COUNT)
+
+
+def read_devices(dev: Device, max_scrolls: int = 2) -> dict:
+    """Returns {'count': n, 'max': m, 'devices': [{'name','status'}]}. Scrolls (at most `max_scrolls`
+    times) until it has read as many rows as the header announces."""
+    m = HEADER_RE.search(dev.text(S.HEADER_COUNT))
+    expected = int(m.group(1)) if m else None
+    seen: dict[str, str] = {}
+    order: list[str] = []
+    for attempt in range(max_scrolls + 1):
+        if attempt:
+            dev.scroll_down()
+        pending = None
+        for rid, text, _y in dev.texts_by_id(S.ROW_NAME_ID, S.ROW_STATUS_ID):
+            if rid == S.ROW_NAME_ID:
+                pending = text
+            elif pending is not None:
+                if pending not in seen:
+                    order.append(pending)
+                seen[pending] = text
+                pending = None
+        if expected is not None and len(seen) >= expected:
+            break
+    count = expected if expected is not None else len(seen)
+    if len(seen) != count:
+        raise FlowError(f"header says {count} devices but read {len(seen)}: {order}")
+    mx = int(m.group(2)) if m else DEFAULT_MAX_DEVICES
+    return {"count": count, "max": mx, "devices": [{"name": n, "status": seen[n]} for n in order]}
+
+
+def remove_device(dev: Device, name: str, dry_run: bool = False) -> None:
+    """Remove ONE device by exact name. Caller is responsible for authorization."""
+    dev.tap_row(name)
+    dev.wait_activity(S.ACT_EDIT)
+    shown = dev.text(S.EDIT_DEVICE_NAME)
+    if shown != name:
+        raise FlowError(f"opened '{shown}' instead of '{name}'; refusing to remove")
+    if dry_run:
+        log.info("[dry-run] would remove '%s'", name)
+        dev.press_back()
+        dev.wait_activity(S.ACT_LINKED)
+        return
+    dev.tap(S.OVERFLOW)
+    dev.tap(S.EDIT_MENU_REMOVE)
+    if dev.text(S.DIALOG_TITLE) != S.TXT_REMOVE_TITLE:
+        raise FlowError("unexpected dialog instead of remove confirmation")
+    dev.tap(S.DIALOG_BUTTON_OK)
+    dev.wait_activity(S.ACT_LINKED)
+    dev.wait_gone({"resourceId": S.ROW_NAME_ID, "text": name}, timeout=15)
+    log.info("removed '%s'", name)
+
+
+def link_with_code(dev: Device, code: str, new_name: str) -> None:
+    """From Linked devices: link a new device and name it. Needs a free slot.
+    `code` must already be normalized (walink.code.normalize_code)."""
+    dev.tap(S.LINK_BUTTON)
+    seen = dev.wait_any({"scanner": {"resourceId": S.SCANNER_PHONE_NUMBER["resourceId"]},
+                         "full": {"resourceId": S.DIALOG_MESSAGE["resourceId"]}}, timeout=15)
+    if seen == "full":
+        raise FlowError("list is full (Meta One dialog); remove a device first")
+    dev.tap(S.SCANNER_PHONE_NUMBER)
+    dev.wait_activity(S.ACT_CODE)
+    boxes = [S.code_box(i) for i in range(1, 9)]
+    dev.type_into_boxes(boxes, code)               # boxes 1-7, verified by readback
+    dev.type_last_box(boxes, code[-1], code[-2])   # 8th box submits
+    log.info("code submitted, waiting for result")
+    result = dev.wait_any({"name": S.NAME_FIELD,
+                           "dialog": S.DIALOG_TITLE}, timeout=45)
+    if result == "dialog":
+        title = dev.text(S.DIALOG_TITLE)
+        msg = dev.text(S.DIALOG_MESSAGE)
+        raise FlowError(f"code rejected: {title}: {msg}")
+    dev.wait_activity(S.ACT_NAME)
+    dev.type_into_field(S.NAME_FIELD, new_name)
+    dev.tap(S.NAME_SAVE)
+    dev.wait_activity(S.ACT_LINKED, timeout=30)
+
+
+def verify_linked(dev: Device, name: str) -> dict:
+    """Success = the name is in the list AND it is not 'Logged out'. Anything else is a failure."""
+    info = read_devices(dev)
+    match = [d for d in info["devices"] if d["name"] == name]
+    if len(match) != 1 or match[0]["status"].lower().startswith("logged out"):
+        raise FlowError(f"link NOT confirmed for '{name}': {info['devices']}")
+    return match[0]
+
+
+def open_chat(dev: Device, name: str) -> None:
+    """From the chat list: search the chat by exact name, open it, verify the title, jump to the newest message.
+    Opening a chat marks it as read (blue ticks are sent)."""
+    dev.open_app_home()
+    dev.tap(S.SEARCH_BAR)
+    dev.type_into_field(S.SEARCH_INPUT, name, tap_first=False)   # tapping the bar focuses the input
+    row = {"resourceId": S.CHAT_ROW_NAME_ID, "text": name}
+    if not dev.exists(row, timeout=8):
+        raise FlowError(f"no chat named exactly '{name}'")
+    dev.tap(row)
+    dev.wait_activity(S.ACT_CHAT)
+    shown = dev.text(S.CHAT_HEADER_NAME)
+    if shown != name:
+        raise FlowError(f"opened '{shown}' instead of '{name}'")
+    if dev.exists(S.CHAT_SCROLL_BOTTOM, timeout=1.5):     # opened at the first unread message
+        dev.tap(S.CHAT_SCROLL_BOTTOM)
+        dev.wait_gone(S.CHAT_SCROLL_BOTTOM, timeout=10)
+
+
+def last_message(dev: Device, name: str) -> dict:
+    """Open the chat `name` and return its newest message (see walink.messages.last_message)."""
+    open_chat(dev, name)
+    try:
+        msg = parse_last_message(dev.hierarchy())
+    except ValueError as e:
+        raise FlowError(f"could not read the last message of '{name}': {e}")
+    return {"chat": name, **msg}
