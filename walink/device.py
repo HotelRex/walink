@@ -204,6 +204,12 @@ class Device:
         log.info("scroll down")
         self._swipe(*SCROLL_SWIPE, duration=0.45)
 
+    def scroll_up(self) -> None:
+        x, y_from, y_to = SCROLL_SWIPE
+        self.pacer.click_pause()
+        log.info("scroll up")
+        self._swipe(x, y_to, y_from, duration=0.45)
+
     def press_back(self) -> None:
         self.pacer.click_pause()
         self._d.press("back")

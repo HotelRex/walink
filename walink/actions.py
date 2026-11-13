@@ -7,7 +7,9 @@ Rules applied here:
 - policy checks and the confirmation run BEFORE the phone is touched (no lock, no device);
 - the phone lock is held for one action only;
 - every action is audited; link, remove, last message and failures are also notified; never message content;
-- on failure: evidence in logs/<timestamp>/, app reset; the screen is locked at the end (except `status`).
+- on failure: evidence in logs/<timestamp>/, app reset; the screen is locked at the end (except `status`);
+- WhatsApp is left on the screen the action ended on, which is remembered (walink.screen_state): the next action
+  within 5 minutes continues from it when the phone still shows it, instead of reopening WhatsApp.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
-from . import flows, lock, paths
+from . import flows, lock, paths, screen_state
 from .audit import audit, notify
 from .code import normalize_code
 from .config import ConfigError, make_pacer
@@ -115,11 +117,6 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
     except Refused as e:
         event("REFUSED", notify_ok)
         log.error("REFUSED: %s", e)
-        if dev:
-            try:
-                dev.leave_app()
-            except Exception as leave_error:
-                log.error("could not leave the app: %s", leave_error)
         raise
     except Exception as e:
         if isinstance(e, EXPECTED_ERRORS):
@@ -127,6 +124,7 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
         else:
             log.exception("FAILED (unexpected %s): %s", type(e).__name__, e)
         evidence = None
+        screen_state.forget()
         if dev:
             dev.save_evidence(run_dir)
             evidence = run_dir
@@ -151,6 +149,18 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
                 held.close()
 
 
+def _to_linked_devices(ctx: Context, dev) -> None:
+    """The Linked devices list: continue on it if the previous action left it open, else open it."""
+    last = screen_state.recall()
+    if last and last["screen"] == screen_state.LINKED_DEVICES and flows.resume_linked_devices(dev):
+        log.info("continuing on the Linked devices screen left by the previous action")
+        ctx.progress("Continuing on the Linked devices screen", 0.08)
+    else:
+        ctx.progress("Opening WhatsApp", 0.05)
+        flows.open_linked_devices(dev)
+    screen_state.remember(screen_state.LINKED_DEVICES)
+
+
 def status(ctx: Context) -> dict:
     with _session(ctx, "STATUS", phone_lock=False) as dev:
         ctx.progress("Reading the phone status", 0.5)
@@ -160,12 +170,9 @@ def status(ctx: Context) -> dict:
 def list_devices(ctx: Context) -> dict:
     """{'count', 'max', 'devices': [{'name', 'status', 'protected'}]}"""
     with _session(ctx, "LIST") as dev:
-        ctx.progress("Opening WhatsApp", 0.05)
-        flows.open_linked_devices(dev)
+        _to_linked_devices(ctx, dev)
         ctx.progress("Reading the linked devices", 0.6)
         info = flows.read_devices(dev)
-        ctx.progress("Closing WhatsApp", 0.9)
-        dev.leave_app()
     protected = _protected(ctx.cfg)
     return {**info, "devices": [{**d, "protected": d["name"] in protected} for d in info["devices"]]}
 
@@ -181,8 +188,7 @@ def link(ctx: Context, code: str, *, replace: str | None = None, name: str | Non
         _check_removal(ctx, replace)
     detail = f"replace='{replace}' name='{new_name}'" if replace else f"name='{new_name}'"
     with _session(ctx, "LINK", detail, notify_ok=True) as dev:
-        ctx.progress("Opening WhatsApp", 0.05)
-        flows.open_linked_devices(dev)
+        _to_linked_devices(ctx, dev)
         ctx.progress("Reading the linked devices", 0.15)
         info = flows.read_devices(dev)
         if replace:
@@ -194,39 +200,40 @@ def link(ctx: Context, code: str, *, replace: str | None = None, name: str | Non
             raise Refused("the list is full: replace a device instead")
         if ctx.dry_run:
             log.info("[dry-run] would link code %s as '%s'", code[:2] + "******", new_name)
-            dev.leave_app()
             return {"name": new_name, "status": "dry-run"}
         flows.link_with_code(dev, code, new_name, _part(ctx, 0.35, 0.85))
         ctx.progress("Checking that the new device is linked", 0.88)
         res = flows.verify_linked(dev, new_name)
         log.info("CONFIRMED: %s", res)
-        dev.leave_app()
+        screen_state.remember(screen_state.LINKED_DEVICES)      # back on the list
         return res
 
 
 def remove(ctx: Context, name: str) -> None:
     _check_removal(ctx, name)
     with _session(ctx, "REMOVE", f"name='{name}'", notify_ok=True) as dev:
-        ctx.progress("Opening WhatsApp", 0.05)
-        flows.open_linked_devices(dev)
+        _to_linked_devices(ctx, dev)
         ctx.progress("Reading the linked devices", 0.4)
         if name not in [d["name"] for d in flows.read_devices(dev)["devices"]]:
             raise Refused(f"no such device: {name}")
         ctx.progress(f"Removing '{name}'", 0.6)
         flows.remove_device(dev, name, ctx.dry_run)
-        dev.leave_app()
+        screen_state.remember(screen_state.LINKED_DEVICES)
 
 
 def last_message(ctx: Context, chat: str) -> dict:
     """Open `chat` (marks it read) and return its newest message. The content is returned, never logged."""
     with _session(ctx, "LAST", f"chat='{chat}'", notify_ok=True) as dev:
-        msg = flows.last_message(dev, chat, _part(ctx, 0.05, 0.9))
+        last = screen_state.recall()
+        resume = bool(last and last["screen"] == screen_state.CHAT and last["chat"] == chat)
+        msg = flows.last_message(dev, chat, _part(ctx, 0.05, 0.9), resume=resume)
+        screen_state.remember(screen_state.CHAT, chat)
         log.info("read last message of '%s' (%s, %s)", chat, msg["direction"], msg["kind"])
-        dev.leave_app()
         return msg
 
 
 def keepalive(ctx: Context) -> None:
+    screen_state.forget()
     with _session(ctx, "KEEPALIVE") as dev:
         ctx.progress("Restarting WhatsApp", 0.1)
         dev.go_home_and_reset_app()
@@ -237,6 +244,7 @@ def keepalive(ctx: Context) -> None:
 
 def reset(ctx: Context) -> None:
     """Force-stop + relaunch WhatsApp, then the launcher (recovery)."""
+    screen_state.forget()
     with _session(ctx, "RESET") as dev:
         ctx.progress("Restarting WhatsApp", 0.2)
         dev.go_home_and_reset_app()

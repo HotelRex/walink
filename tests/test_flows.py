@@ -63,3 +63,53 @@ def test_landscape_needs_more_scrolls_and_still_reads_everything():
                                                    rows(("D", "x"))])
     assert [d["name"] for d in flows.read_devices(dev)["devices"]] == ["A", "B", "C", "D"]
     assert dev.scrolls == 3
+
+
+class Phone:
+    """A phone left on some screen by the previous action."""
+
+    def __init__(self, activity, header_after_scrolls=0, chat_title=None, scroll_bottom=False):
+        self.act, self.scrolls_needed, self.title, self.bottom = activity, header_after_scrolls, chat_title, scroll_bottom
+        self.calls = []
+
+    def wake_and_unlock(self):
+        self.calls.append("wake")
+
+    def activity(self):
+        return self.act
+
+    def exists(self, sel, timeout=0):
+        if sel == S.HEADER_COUNT:
+            return self.calls.count("scroll_up") >= self.scrolls_needed
+        if sel == S.CHAT_SCROLL_BOTTOM:
+            return self.bottom
+        return False
+
+    def scroll_up(self):
+        self.calls.append("scroll_up")
+
+    def text(self, sel, timeout=5):
+        return self.title
+
+    def tap(self, sel):
+        self.calls.append("tap")
+
+    def wait_gone(self, sel, timeout=10):
+        self.bottom = False
+
+
+def test_resume_linked_devices_scrolls_back_to_the_header():
+    phone = Phone(S.ACT_LINKED, header_after_scrolls=1)
+    assert flows.resume_linked_devices(phone)
+    assert phone.calls == ["wake", "scroll_up"]
+
+
+def test_resume_linked_devices_refuses_other_screens():
+    assert not flows.resume_linked_devices(Phone(S.ACT_HOME))
+
+
+def test_resume_chat_only_the_same_chat_and_jumps_to_newest():
+    assert not flows.resume_chat(Phone(S.ACT_CHAT, chat_title="Bank"), "PayPal")
+    assert not flows.resume_chat(Phone(S.ACT_HOME), "PayPal")
+    phone = Phone(S.ACT_CHAT, chat_title="PayPal", scroll_bottom=True)
+    assert flows.resume_chat(phone, "PayPal") and "tap" in phone.calls

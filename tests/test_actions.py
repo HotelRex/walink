@@ -1,7 +1,7 @@
 """The action layer: every rule (lock, protected, confirmation, audit, notify, recovery) in one place."""
 import pytest
 
-from walink import actions, audit, flows, lock, paths
+from walink import actions, audit, flows, lock, paths, screen_state
 from walink.code import CodeError
 
 DEVICES = {"count": 3, "max": 4, "devices": [{"name": n, "status": "Active now"} for n in ("Hotel Rex", "Test", "Sara")]}
@@ -25,6 +25,7 @@ class FakeDevice:
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "LOGS", tmp_path / "logs")
+    monkeypatch.setattr(paths, "STATE", tmp_path / "state")
     state = {"order": [], "devices": [], "notified": [], "locks": 0, "confirms": [], "answer": True, "info": DEVICES}
 
     def acquire():
@@ -40,12 +41,17 @@ def env(tmp_path, monkeypatch):
             return result() if callable(result) else result
         return f
     monkeypatch.setattr(flows, "open_linked_devices", rec("open"))
+    state["still_there"] = True
+    monkeypatch.setattr(flows, "resume_linked_devices", lambda dev: state["order"].append(("resume", ())) or
+                        state["still_there"])
     monkeypatch.setattr(flows, "read_devices", rec("read", lambda: state["info"]))
     monkeypatch.setattr(flows, "remove_device", rec("remove"))
     monkeypatch.setattr(flows, "link_with_code", rec("link"))
     monkeypatch.setattr(flows, "verify_linked", rec("verify", {"name": "Hotel Rex", "status": "Active now"}))
-    monkeypatch.setattr(flows, "last_message", rec("last", {"chat": "PayPal", "text": "SECRET 123456",
-                                                             "direction": "incoming", "kind": "text"}))
+    def last(dev, chat, progress, resume=False):
+        state["order"].append(("last", (chat, resume)))
+        return {"chat": chat, "text": "SECRET 123456", "direction": "incoming", "kind": "text"}
+    monkeypatch.setattr(flows, "last_message", last)
     monkeypatch.setattr(actions, "KEEPALIVE_ONLINE_S", 0)
 
     def factory(serial, pacer):
@@ -82,7 +88,7 @@ def test_remove_declined_touches_nothing(env):
 def test_remove_confirmed(env):
     actions.remove(env["ctx"], "Sara")
     assert names(env) == ["open", "read", "remove"]
-    assert env["devices"][0].calls[-2:] == ["leave_app", "lock_screen"]
+    assert env["devices"][0].calls[-1] == "lock_screen" and "leave_app" not in env["devices"][0].calls
     assert "REMOVE" in env["audit"]() and env["notified"]
 
 
@@ -200,3 +206,47 @@ def test_last_message_progress_never_contains_the_message(env):
     env["ctx"].progress = lambda text, fraction: steps.append(text)
     actions.last_message(env["ctx"], "PayPal")
     assert steps and not any("SECRET" in s for s in steps)
+
+
+def test_next_action_within_five_minutes_continues_on_linked_devices(env):
+    actions.list_devices(env["ctx"])
+    env["order"].clear()
+    actions.remove(env["ctx"], "Sara")
+    assert names(env)[:2] == ["resume", "read"] and "open" not in names(env)
+
+
+def test_resume_falls_back_when_the_phone_shows_something_else(env):
+    actions.list_devices(env["ctx"])
+    env["order"].clear()
+    env["still_there"] = False
+    actions.list_devices(env["ctx"])
+    assert names(env)[:2] == ["resume", "open"]
+
+
+def test_old_record_means_fresh_start(env):
+    screen_state.remember(screen_state.LINKED_DEVICES, now=0)       # long ago
+    actions.list_devices(env["ctx"])
+    assert names(env)[0] == "open"
+
+
+def test_failure_and_keepalive_forget_the_screen(env, monkeypatch):
+    actions.list_devices(env["ctx"])
+    assert screen_state.recall()["screen"] == "linked_devices"
+    actions.keepalive(env["ctx"])
+    assert screen_state.recall() is None
+    actions.list_devices(env["ctx"])
+
+    def boom(*a, **k):
+        raise flows.FlowError("x")
+    monkeypatch.setattr(flows, "read_devices", boom)
+    with pytest.raises(actions.ActionFailed):
+        actions.list_devices(env["ctx"])
+    assert screen_state.recall() is None
+
+
+def test_last_message_continues_only_in_the_same_chat(env):
+    actions.last_message(env["ctx"], "PayPal")
+    actions.last_message(env["ctx"], "PayPal")
+    actions.last_message(env["ctx"], "Bank")
+    assert [o[1] for o in env["order"] if o[0] == "last"] == [("PayPal", False), ("PayPal", True), ("Bank", False)]
+    assert screen_state.recall()["chat"] == "Bank"

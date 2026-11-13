@@ -60,8 +60,11 @@ The TUI and the commands are the same program with the same rules (`walink/actio
   phone has no PIN; it falls back to a swipe; ~1.9 s), bring WhatsApp Business to the front and back out to the chat list, like a
   person reopening the app. If that does not reach the chat list, it falls back to force-stop + relaunch (no data cleared).
   Failure recovery and `keepalive` always use the force-stop + relaunch.
-- A successful run backs out to the chat list and goes to the launcher home. **Every run (except `status`) ends by turning
-  the screen off, which locks the phone** (`lock_screen_when_done: false` in `config.yaml` to disable).
+- A run leaves WhatsApp on the screen it ended on (the Linked devices list, or the chat it read) and remembers it in
+  `state/screen.json`. The next run within **5 minutes** checks that the phone still shows that screen and continues from
+  there (a second `list` takes ~5 s instead of ~10 s); otherwise, or after a failure, keepalive or reset, it starts
+  fresh. **Every run (except `status`) still ends by turning the screen off, which locks the phone**
+  (`lock_screen_when_done: false` in `config.yaml` to disable).
 - Codes expire within about a minute: start the command right after the workstation shows the code.
   A full link takes about 55 s; the code is entered ~15 s after you launch it.
 
@@ -79,7 +82,8 @@ Run `python walink.py` (or log in over SSH, below). It opens on a menu; the phon
 - **Link a computer** (`l`): the linked devices are read from the phone, you pick the one to replace (or `(free slot)`),
   then enter the code and the name (pre-filled when replacing). Show the code on the computer first: it expires in
   about a minute.
-- **Remove a linked device** (`d`), **Show the linked devices** (`r`), **Keepalive** (`k`), **Phone status** (`s`), **Quit** (`q`).
+- **Remove a linked device** (`d`), **Quit** (`q`). With `--debug` also **Show the linked devices** (`r`), **Keepalive** (`k`)
+  and **Phone status** (`s`); the CLI always has them (`list`, `keepalive`, `status`).
 - While the phone works, a dialog shows the current step in plain words, a progress bar and the elapsed seconds.
   Results and errors appear in a dialog until you close it.
 - `[locked]` devices are protected: they cannot be picked for removal or replacement. Any removal asks

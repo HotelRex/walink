@@ -35,6 +35,19 @@ def open_linked_devices(dev: Device) -> None:
     dev.text(S.HEADER_COUNT)
 
 
+def resume_linked_devices(dev: Device) -> bool:
+    """Continue on the Linked devices list a previous action left open, if the phone still shows it
+    (scrolled back to the top, where the header is). False: the caller opens it from scratch."""
+    dev.wake_and_unlock()
+    if dev.activity() != S.ACT_LINKED:
+        return False
+    for _ in range(3):
+        if dev.exists(S.HEADER_COUNT, timeout=0.5):
+            return True
+        dev.scroll_up()
+    return dev.exists(S.HEADER_COUNT, timeout=0.5)
+
+
 def read_devices(dev: Device, max_scrolls: int = 6) -> dict:
     """Returns {'count': n, 'max': m, 'devices': [{'name','status'}]}. Scrolls (at most `max_scrolls`
     times) until it has read as many rows as the header announces."""
@@ -141,14 +154,37 @@ def open_chat(dev: Device, name: str, progress: Progress = _no_progress) -> None
     shown = dev.text(S.CHAT_HEADER_NAME)
     if shown != name:
         raise FlowError(f"opened '{shown}' instead of '{name}'")
-    if dev.exists(S.CHAT_SCROLL_BOTTOM, timeout=1.5):     # opened at the first unread message
+    _go_to_newest(dev)
+
+
+def _go_to_newest(dev: Device) -> None:
+    if dev.exists(S.CHAT_SCROLL_BOTTOM, timeout=1.5):     # not at the bottom (e.g. opened at the first unread)
         dev.tap(S.CHAT_SCROLL_BOTTOM)
         dev.wait_gone(S.CHAT_SCROLL_BOTTOM, timeout=10)
 
 
-def last_message(dev: Device, name: str, progress: Progress = _no_progress) -> dict:
-    """Open the chat `name` and return its newest message (see walink.messages.last_message)."""
-    open_chat(dev, name, progress)
+def resume_chat(dev: Device, name: str) -> bool:
+    """Continue in chat `name` if a previous action left it open and the phone still shows it."""
+    dev.wake_and_unlock()
+    if dev.activity() != S.ACT_CHAT:
+        return False
+    try:
+        shown = dev.text(S.CHAT_HEADER_NAME, timeout=1)
+    except DeviceError:
+        return False
+    if shown != name:
+        return False
+    _go_to_newest(dev)
+    return True
+
+
+def last_message(dev: Device, name: str, progress: Progress = _no_progress, resume: bool = False) -> dict:
+    """Open the chat `name` (or, with `resume`, continue in it if it is still open) and return its newest
+    message (see walink.messages.last_message)."""
+    if resume and resume_chat(dev, name):
+        progress(f"Continuing in the open chat '{name}'", 0.7)
+    else:
+        open_chat(dev, name, progress)
     progress("Reading the newest message", 0.9)
     try:
         msg = parse_last_message(dev.hierarchy())

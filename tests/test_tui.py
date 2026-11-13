@@ -109,15 +109,23 @@ def test_start_shows_menu_and_does_not_touch_the_phone():
             text = shot(app)
             assert "Read the last message of a chat" in text and "What do you want to do?" in text
             assert not app.query("#log")                   # no logs without --debug
+            for hidden in ("Show the linked devices", "Keepalive", "Phone status"):
+                assert hidden not in text
+            await pilot.press("r", "k", "s")
+            await pilot.pause(0.1)
+            assert fake.calls == [] and screen_name(app) == "Screen"
     run(go())
 
 
-def test_debug_shows_log_pane():
+def test_debug_shows_log_pane_and_maintenance_items():
     async def go():
         app, _, _ = make_app(debug=True)
-        async with app.run_test(size=(120, 30)) as pilot:
+        async with app.run_test(size=(140, 30)) as pilot:
             await pilot.pause()
             assert app.query("#log")
+            text = shot(app)
+            for item in ("Show the linked devices", "Keepalive", "Phone status"):
+                assert item in text
     run(go())
 
 
@@ -248,7 +256,7 @@ def test_remove_confirmed():
 
 def test_keys_disabled_while_busy_and_quit_waits():
     async def go():
-        app, fake, _ = make_app()
+        app, fake, _ = make_app(debug=True)
         fake.gate = threading.Event()
         exits = []
         async with app.run_test(size=(100, 30)) as pilot:
@@ -271,7 +279,7 @@ def test_keys_disabled_while_busy_and_quit_waits():
 
 def test_hangup_waits_for_running_action():
     async def go():
-        app, fake, _ = make_app()
+        app, fake, _ = make_app(debug=True)
         fake.gate = threading.Event()
         exits = []
         async with app.run_test(size=(100, 30)) as pilot:
@@ -307,7 +315,7 @@ def test_busy_phone_shows_a_clear_message():
         fake.list_error = Busy("in use")
         app, _, _ = make_app(fake)
         async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.press("r")
+            await pilot.press("d")
             await wait_screen(pilot, app, "MessageScreen")
             assert app.screen.title_text == "The phone is busy"
     run(go())

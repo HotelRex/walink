@@ -46,6 +46,8 @@ MENU = [
     ("status", "s", "Phone status"),
     ("quit", "q", "Quit"),
 ]
+# Maintenance items: only with --debug (the CLI always has them).
+DEBUG_ONLY = {"devices", "keepalive", "status"}
 
 
 def _valid_code(raw: str) -> bool:
@@ -323,8 +325,8 @@ class WalinkApp(App):
         Binding("l", "link", "Link"),
         Binding("d", "delete", "Remove"),
         Binding("r", "devices", "Devices"),
-        Binding("k", "keepalive", "Keepalive", show=False),
-        Binding("s", "status", "Status", show=False),
+        Binding("k", "keepalive", "Keepalive"),
+        Binding("s", "status", "Status"),
         Binding("q", "quit", "Quit"),
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
     ]
@@ -349,7 +351,9 @@ class WalinkApp(App):
         yield Static(f"walink — WhatsApp Business linked devices   (key: {self.label}){dry}", id="header",
                      markup=False)
         with Horizontal(id="main"):
-            yield OptionList(*[Option(f"{text}   [{key}]", id=name) for name, key, text in MENU], id="menu")
+            items = [Option(f"{text}   [{key}]", id=name) for name, key, text in MENU
+                     if self.debug_mode or name not in DEBUG_ONLY]
+            yield OptionList(*items, id="menu")
             if self.debug_mode:
                 yield RichLog(id="log", wrap=True, markup=False, highlight=False)
         yield Footer()
@@ -410,7 +414,10 @@ class WalinkApp(App):
                                       dry_run=self.dry_run, progress=self._report)
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        """Phone actions only from the menu: not while the phone works, not from inside a dialog."""
+        """Phone actions only from the menu: not while the phone works, not from inside a dialog;
+        maintenance actions only with --debug."""
+        if action in DEBUG_ONLY and not self.debug_mode:
+            return False
         if action in PHONE_ACTIONS and (self.busy or isinstance(self.screen, ModalScreen)):
             return False
         return True
