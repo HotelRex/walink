@@ -1,70 +1,81 @@
-"""The SSH wrapper with the CLI subprocess faked."""
-import json
+"""The SSH forced command: TUI on a plain login, any CLI command one-shot, timeout + reset."""
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 import walink_remote as wr
-from walink import lock
+from walink import audit, cli, paths
 
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    monkeypatch.setattr(wr, "AUDIT_LOG", tmp_path / "logs" / "remote-audit.log")
-    monkeypatch.setattr(lock, "LOCK_PATH", tmp_path / "state" / "phone.lock")
-    monkeypatch.delenv("WALINK_LOCK_HELD", raising=False)
-    calls = []
+    monkeypatch.setattr(paths, "LOGS", tmp_path / "logs")
+    monkeypatch.setattr(sys, "argv", ["walink_remote.py", "pc"])
+    monkeypatch.setattr(wr, "load_config", lambda: {"remote": {"timeout_s": 7}})
+    runs = []
+    state = SimpleNamespace(runs=runs, returncode=0, timeout_on=None,
+                            audit=lambda: (tmp_path / "logs" / "audit.log").read_text(encoding="utf-8"))
 
-    def fake_cli(cfg, *args, timeout=None):
-        calls.append(args)
-        return env.result(args)
-    env = SimpleNamespace(calls=calls, result=lambda args: SimpleNamespace(returncode=0, stdout="", stderr=""),
-                          audit=lambda: (tmp_path / "logs" / "remote-audit.log").read_text(encoding="utf-8"),
-                          rate=tmp_path / "state" / "remote-rate.json")
-    monkeypatch.setattr(wr, "run_cli", fake_cli)
-    return env
-
-
-CFG = {"max_attempts_per_hour": 2}
+    def fake_run(cmd, **kw):
+        runs.append((cmd, kw))
+        if state.timeout_on and cmd[2] == state.timeout_on:
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+        return SimpleNamespace(returncode=state.returncode)
+    monkeypatch.setattr(wr.subprocess, "run", fake_run)
+    return state
 
 
-def test_relink_ok(env, capsys):
-    assert wr.do_relink({}, CFG, "pc", "Hotel Rex", "ABCDEFGH") == 0
-    assert env.calls == [("link", "ABCDEFGH", "--replace", "Hotel Rex", "--confirm-remove", "Hotel Rex")]
-    assert "OK" in capsys.readouterr().out
+def test_empty_command_runs_cli_in_process(env, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "main", lambda argv, label=None: seen.append((argv, label)) or 0)
+    monkeypatch.delenv("SSH_ORIGINAL_COMMAND", raising=False)
+    assert wr.main() == 0
+    assert seen == [([], "pc")] and env.runs == []
 
 
-def test_relink_protected_never_runs(env):
-    with pytest.raises(wr.Rejected):
-        wr.do_relink({"protected_devices": ["Test"]}, CFG, "pc", "Test", "ABCDEFGH")
-    assert env.calls == []
+def test_one_shot_passes_exit_code_and_label(env, monkeypatch):
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "unlink Sara --yes")
+    env.returncode = 4
+    assert wr.main() == 4
+    cmd, kw = env.runs[0]
+    assert cmd[2:] == ["unlink", "Sara", "--yes"]
+    assert kw["env"]["WALINK_AUDIT_LABEL"] == "pc" and kw["timeout"] == 7
+    assert "capture_output" not in kw          # output streams live to the SSH client
 
 
-def test_timeout_triggers_reset(env, capsys):
-    env.result = lambda args: None if args[0] == "link" else SimpleNamespace(returncode=0, stdout="", stderr="")
-    assert wr.do_relink({}, CFG, "pc", "Hotel Rex", "ABCDEFGH") == wr.EXIT_FAILED
-    assert env.calls[1] == ("reset",)
-    assert "TIMEOUT_RESET_OK" in env.audit() and "FAILED" in capsys.readouterr().out
+def test_relink_alias_runs_link(env, monkeypatch):
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "relink 'Hotel Rex' ABCDEFGH")
+    wr.main()
+    assert env.runs[0][0][2:] == ["link", "ABCDEFGH", "--replace", "Hotel Rex", "--yes"]
 
 
-def test_broken_notifier_does_not_stop_relink(env, monkeypatch):
-    def hang(*a, **k):
-        raise subprocess.TimeoutExpired("ntfy", 20)
-    monkeypatch.setattr(wr.subprocess, "run", hang)
-    assert wr.do_relink({}, dict(CFG, notify_cmd="ntfy"), "pc", "Hotel Rex", "ABCDEFGH") == 0
-    assert "NOTIFY_FAILED" in env.audit()
+def test_timeout_runs_reset(env, monkeypatch, capsys):
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "link ABCDEFGH --name X")
+    env.timeout_on = "link"
+    assert wr.main() == 2
+    assert env.runs[1][0][2:] == ["reset"]
+    assert "TIMEOUT" in env.audit() and "TIMEOUT_RESET_OK" in env.audit()
+    assert "timed out" in capsys.readouterr().err
 
 
-def test_last_reads_json_stdout_and_keeps_content_out_of_audit(env, capsys):
-    msg = {"chat": "PayPal", "text": "Code 123456 🔐", "day": "Today", "time": "1:00 PM",
-           "direction": "incoming", "status": None, "sender": None, "kind": "text"}
-    env.result = lambda args: SimpleNamespace(returncode=0, stdout=json.dumps(msg, ensure_ascii=False) + "\n", stderr="")
-    assert wr.do_last(CFG, "pc", "PayPal") == 0
-    assert "123456 🔐" in capsys.readouterr().out
-    assert "LAST_OK" in env.audit() and "123456" not in env.audit()
+def test_rejected_request_is_audited(env, monkeypatch):
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "last 'unterminated")
+    assert wr.main() == 4
+    assert "REJECTED" in env.audit() and env.runs == []
 
 
-def test_audit_survives_missing_ssh_client(env, monkeypatch):
-    monkeypatch.setenv("SSH_CLIENT", "")
-    assert "ip=?" in wr.audit("pc", "X")
+def test_bad_label(env, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["walink_remote.py", "bad label!"])
+    assert wr.main() == 3
+
+
+def test_cli_uses_env_label(monkeypatch):
+    from walink import actions
+    seen = []
+    monkeypatch.setattr(cli, "load_config", lambda: {})
+    monkeypatch.setattr(actions, "status", lambda ctx: seen.append(ctx.label) or {})
+    monkeypatch.setenv("WALINK_AUDIT_LABEL", "pc")
+    cli.main(["status"])
+    assert seen == ["pc"]
