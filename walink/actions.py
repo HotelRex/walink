@@ -8,6 +8,8 @@ Rules applied here:
 - policy checks and the confirmation run BEFORE the phone is touched (no lock, no device);
 - the phone lock is held for one action only;
 - every action is audited; link, remove, last message and failures are also notified; never message content;
+- if the phone drops off adb mid-action and comes back (walink.device recovery), the action starts again once from
+  step 0, unless it passed its point of no return (a link whose code was already submitted);
 - on failure: evidence in logs/<timestamp>/, app reset; the screen is locked at the end (except `status`);
 - WhatsApp is left on the screen the action ended on, which is remembered (walink.screen_state): the next action
   within 5 minutes continues from it when the phone still shows it, instead of reopening WhatsApp.
@@ -17,16 +19,15 @@ from __future__ import annotations
 import getpass
 import logging
 import time
-from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable
 
 from . import flows, lock, paths, screen_state
 from .audit import audit, notify
 from .code import normalize_code
 from .config import ConfigError, make_pacer
-from .device import Device, DeviceError
+from .device import Device, DeviceError, is_connection_loss
 
 log = logging.getLogger("walink")
 
@@ -39,6 +40,10 @@ EXPECTED_ERRORS = (DeviceError, ConfigError)
 
 class Refused(Exception):
     """The action was not allowed or not confirmed; nothing (more) was changed."""
+
+
+class ConnectionLost(DeviceError):
+    """The phone dropped off adb mid-action and the action could not (or must not) be repeated."""
 
 
 class ActionFailed(Exception):
@@ -93,10 +98,23 @@ def _check_removal(ctx: Context, name: str) -> None:
         raise Refused("cancelled: nothing was removed")
 
 
-@contextmanager
-def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = False,
-             phone_lock: bool = True) -> Iterator:
-    """Lock, device, per-run log, audit, recovery and screen lock around one action."""
+@dataclass
+class Job:
+    """One run of an action's body. The body records what it has done so a second attempt (after the connection to
+    the phone was lost and came back) can skip it, and marks the point after which repeating is unsafe."""
+    attempt: int = 1
+    no_retry: str | None = None             # why a second attempt is unsafe (None: it is safe)
+    done: set = field(default_factory=set)  # steps already started, e.g. "remove"
+
+    def point_of_no_return(self, why: str) -> None:
+        self.no_retry = why
+
+
+def _run(ctx: Context, action: str, body: Callable, detail: str = "", notify_ok: bool = False,
+         phone_lock: bool = True):
+    """Lock, device, per-run log, audit, recovery and screen lock around one action; returns body(dev, job).
+    If the connection to the phone is lost mid-action and adb comes back, the body runs once more from step 0
+    (fresh WhatsApp, fresh device) unless it passed its point of no return. The lock is held throughout."""
     held = lock.acquire() if phone_lock else None
     run_dir = paths.LOGS / time.strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -107,19 +125,47 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
         log.setLevel(logging.INFO)
     dry = " dry-run" if ctx.dry_run else ""
 
-    def event(name: str, send: bool) -> None:
-        line = audit(ctx.label, f"{action}_{name}", detail + dry)
+    def event(name: str, send: bool, extra: str = "") -> None:
+        line = audit(ctx.label, f"{action}_{name}", detail + dry + extra)
         if send:
             notify(ctx.cfg, line)
 
+    def connect():
+        ctx.progress("Connecting to the phone", 0.02)
+        return ctx.device_factory(ctx.serial or ctx.cfg.get("serial"), make_pacer(ctx.cfg))
+
     dev = None
     adb_dead = False
+    job = Job()
     try:
         event("START", notify_ok)
-        ctx.progress("Connecting to the phone", 0.02)
-        dev = ctx.device_factory(ctx.serial or ctx.cfg.get("serial"), make_pacer(ctx.cfg))
-        yield dev
+        dev = connect()
+        while True:
+            try:
+                result = body(dev, job)
+                break
+            except Refused:
+                raise
+            except Exception as e:
+                lost = is_connection_loss(e) or not dev.adb_ok()
+                if not lost:
+                    raise
+                log.error("lost the connection to the phone: %s", e)
+                if not dev.adb_ok(recover=True):
+                    adb_dead = True
+                    raise
+                if job.attempt > 1 or job.no_retry:
+                    if job.no_retry:
+                        log.error("the phone is back, but not repeating the action: %s", job.no_retry)
+                    raise ConnectionLost(f"lost the connection to the phone ({e})"
+                                         + (f"; not repeated: {job.no_retry}" if job.no_retry else "")) from e
+                log.warning("the phone is back: starting the action again from the start")
+                event("RETRY", False, " after connection loss")
+                screen_state.forget()
+                job.attempt += 1
+                dev = connect()
         event("OK", notify_ok)
+        return result
     except Refused as e:
         event("REFUSED", notify_ok)
         log.error("REFUSED: %s", e)
@@ -131,7 +177,7 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
             log.exception("FAILED (unexpected %s): %s", type(e).__name__, e)
         evidence = None
         screen_state.forget()
-        if dev and not dev.adb_ok(recover=True):     # a dead adb would make each cleanup step wait out its timeout
+        if dev and (adb_dead or not dev.adb_ok(recover=True)):  # a dead adb makes each cleanup step wait it out
             adb_dead = True
             log.error("adb is not responding (adb server restarted once): "
                       "skipped the screenshot, the app reset and the screen lock")
@@ -172,19 +218,34 @@ def _to_linked_devices(ctx: Context, dev) -> None:
 
 
 def status(ctx: Context) -> dict:
-    with _session(ctx, "STATUS", phone_lock=False) as dev:
+    def body(dev, job):
         ctx.progress("Reading the phone status", 0.5)
         return dev.info()
+    return _run(ctx, "STATUS", body, phone_lock=False)
 
 
 def list_devices(ctx: Context) -> dict:
     """{'count', 'max', 'devices': [{'name', 'status', 'protected'}]}"""
-    with _session(ctx, "LIST") as dev:
+    def body(dev, job):
         _to_linked_devices(ctx, dev)
         ctx.progress("Reading the linked devices", 0.6)
-        info = flows.read_devices(dev)
+        return flows.read_devices(dev)
+    info = _run(ctx, "LIST", body)
     protected = _protected(ctx.cfg)
     return {**info, "devices": [{**d, "protected": d["name"] in protected} for d in info["devices"]]}
+
+
+def _remove_on_list(ctx: Context, dev, job: Job, name: str, info: dict, fraction: float) -> None:
+    """Remove `name` from the list just read. On a second attempt a device that is already gone was removed by the
+    first one (the connection dropped during the removal), so there is nothing left to do."""
+    if name not in [d["name"] for d in info["devices"]]:
+        if "remove" in job.done:
+            log.info("'%s' is already gone: removed before the connection dropped", name)
+            return
+        raise Refused(f"no such device: {name}")
+    ctx.progress(f"Removing '{name}'", fraction)
+    job.done.add("remove")
+    flows.remove_device(dev, name, ctx.dry_run)
 
 
 def link(ctx: Context, code: str, *, replace: str | None = None, name: str | None = None) -> dict:
@@ -197,43 +258,44 @@ def link(ctx: Context, code: str, *, replace: str | None = None, name: str | Non
     if replace:
         _check_protected(replace, ctx.cfg)          # no "Are you sure?": replacing is what was asked for
     detail = f"replace='{replace}' name='{new_name}'" if replace else f"name='{new_name}'"
-    with _session(ctx, "LINK", detail, notify_ok=True) as dev:
+
+    def body(dev, job):
         _to_linked_devices(ctx, dev)
         ctx.progress("Reading the linked devices", 0.15)
         info = flows.read_devices(dev)
         if replace:
-            if replace not in [d["name"] for d in info["devices"]]:
-                raise Refused(f"no such device: {replace}")
-            ctx.progress(f"Removing '{replace}'", 0.25)
-            flows.remove_device(dev, replace, ctx.dry_run)
+            _remove_on_list(ctx, dev, job, replace, info, 0.25)
         elif info["count"] >= info["max"]:
             raise Refused("the list is full: replace a device instead")
         if ctx.dry_run:
             log.info("[dry-run] would link code %s as '%s'", code[:2] + "******", new_name)
             return {"name": new_name, "status": "dry-run"}
-        flows.link_with_code(dev, code, new_name, _part(ctx, 0.35, 0.85))
+
+        def submitting() -> None:
+            job.point_of_no_return("the code was already submitted (it works once); check the linked devices")
+        flows.link_with_code(dev, code, new_name, _part(ctx, 0.35, 0.85), on_submit=submitting)
         ctx.progress("Checking that the new device is linked", 0.88)
         res = flows.verify_linked(dev, new_name)
         log.info("CONFIRMED: %s", res)
         screen_state.remember(screen_state.LINKED_DEVICES)      # back on the list
         return res
+    return _run(ctx, "LINK", body, detail, notify_ok=True)
 
 
 def remove(ctx: Context, name: str) -> None:
     _check_removal(ctx, name)
-    with _session(ctx, "REMOVE", f"name='{name}'", notify_ok=True) as dev:
+
+    def body(dev, job):
         _to_linked_devices(ctx, dev)
         ctx.progress("Reading the linked devices", 0.4)
-        if name not in [d["name"] for d in flows.read_devices(dev)["devices"]]:
-            raise Refused(f"no such device: {name}")
-        ctx.progress(f"Removing '{name}'", 0.6)
-        flows.remove_device(dev, name, ctx.dry_run)
+        _remove_on_list(ctx, dev, job, name, flows.read_devices(dev), 0.6)
         screen_state.remember(screen_state.LINKED_DEVICES)
+    _run(ctx, "REMOVE", body, f"name='{name}'", notify_ok=True)
 
 
 def last_message(ctx: Context, chat: str) -> dict:
     """Open `chat` (marks it read) and return its newest message. The content is returned, never logged."""
-    with _session(ctx, "LAST", f"chat='{chat}'", notify_ok=True) as dev:
+    def body(dev, job):
         last = screen_state.recall()
         resume = bool(last and last["screen"] == screen_state.CHAT
                       and (last["chat"] or "").casefold() == chat.casefold())
@@ -241,22 +303,27 @@ def last_message(ctx: Context, chat: str) -> dict:
         screen_state.remember(screen_state.CHAT, msg.get("chat") or chat)
         log.info("read last message of '%s' (%s, %s)", chat, msg["direction"], msg["kind"])
         return msg
+    return _run(ctx, "LAST", body, f"chat='{chat}'", notify_ok=True)
 
 
 def keepalive(ctx: Context) -> None:
     screen_state.forget()
-    with _session(ctx, "KEEPALIVE") as dev:
+
+    def body(dev, job):
         ctx.progress("Restarting WhatsApp", 0.1)
         dev.go_home_and_reset_app()
         ctx.progress("Keeping WhatsApp online for a moment", 0.6)
         time.sleep(KEEPALIVE_ONLINE_S)
         dev.go_home_screen()
+    _run(ctx, "KEEPALIVE", body)
 
 
 def reset(ctx: Context) -> None:
     """Force-stop + relaunch WhatsApp, then the launcher (recovery)."""
     screen_state.forget()
-    with _session(ctx, "RESET") as dev:
+
+    def body(dev, job):
         ctx.progress("Restarting WhatsApp", 0.2)
         dev.go_home_and_reset_app()
         dev.go_home_screen()
+    _run(ctx, "RESET", body)

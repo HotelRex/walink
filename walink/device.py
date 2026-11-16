@@ -10,7 +10,10 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable
 
+import requests
 import uiautomator2 as _u2
+import uiautomator2.exceptions as _u2_exc
+from adbutils import AdbError
 from uiautomator2.exceptions import UiObjectNotFoundError
 
 from . import selectors as S
@@ -36,6 +39,27 @@ UNLOCK_SWIPE = (0.5, 0.80, 0.25)
 
 class DeviceError(RuntimeError):
     pass
+
+
+class AdbCommandError(DeviceError):
+    """An adb command failed or hung (transport trouble, unlike "element not found" DeviceErrors)."""
+
+
+# uiautomator2's own DeviceError family (ConnectError, HTTPError, AdbShellError, ...) means the link to the phone or to
+# its agent broke; its RPCError family (element not found, ...) is about the screen and is not listed here.
+_TRANSPORT_ERRORS = (AdbCommandError, _u2_exc.DeviceError, AdbError, requests.exceptions.ConnectionError,
+                     requests.exceptions.Timeout, ConnectionError)
+
+
+def is_connection_loss(error: BaseException) -> bool:
+    """True when `error` (or what caused it) is the phone dropping off adb, not something on the screen."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, _TRANSPORT_ERRORS):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
 
 
 def _run_adb(*args: str, timeout: float) -> subprocess.CompletedProcess | None:
@@ -135,9 +159,11 @@ class Device:
         try:
             r = subprocess.run(["adb", "-s", self._serial, *args], capture_output=True, timeout=ADB_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            raise DeviceError(f"adb {' '.join(args)} timed out after {ADB_TIMEOUT_S}s")
+            raise AdbCommandError(f"adb {' '.join(args)} timed out after {ADB_TIMEOUT_S}s")
+        except OSError as e:
+            raise AdbCommandError(f"cannot run adb: {e}")
         if check and r.returncode != 0:
-            raise DeviceError(f"adb {' '.join(args)} failed: {r.stderr.decode(errors='replace')}")
+            raise AdbCommandError(f"adb {' '.join(args)} failed: {r.stderr.decode(errors='replace')}")
         return r.stdout if binary else r.stdout.decode(errors="replace")
 
     # ---------- read-only inspection (no pacing needed) ----------

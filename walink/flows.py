@@ -98,9 +98,11 @@ def remove_device(dev: Device, name: str, dry_run: bool = False) -> None:
     log.info("removed '%s'", name)
 
 
-def link_with_code(dev: Device, code: str, new_name: str, progress: Progress = _no_progress) -> None:
+def link_with_code(dev: Device, code: str, new_name: str, progress: Progress = _no_progress,
+                   on_submit: Callable[[], None] = lambda: None) -> None:
     """From Linked devices: link a new device and name it. Needs a free slot.
-    `code` must already be normalized (walink.code.normalize_code)."""
+    `code` must already be normalized (walink.code.normalize_code). `on_submit` runs just before the 8th character,
+    which submits the code: from then on the code is used up and repeating the flow is pointless."""
     progress("Opening the code screen", 0.0)
     dev.tap(S.LINK_BUTTON)
     seen = dev.wait_any({"scanner": {"resourceId": S.SCANNER_PHONE_NUMBER["resourceId"]},
@@ -112,6 +114,7 @@ def link_with_code(dev: Device, code: str, new_name: str, progress: Progress = _
     progress("Entering the code", 0.25)
     boxes = [S.code_box(i) for i in range(1, 9)]
     dev.type_into_boxes(boxes, code)               # boxes 1-7, verified by readback
+    on_submit()
     dev.type_last_box(boxes, code[-1], code[-2])   # 8th box submits
     log.info("code submitted, waiting for result")
     progress("Waiting for WhatsApp to accept the code", 0.45)

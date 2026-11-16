@@ -103,3 +103,23 @@ def test_two_phones_need_serial_without_restarting(adb):
     with pytest.raises(DeviceError, match="pass --serial"):
         ensure_adb(None)
     assert "kill-server" not in fake.cmds
+
+
+def test_connection_loss_vs_screen_problems():
+    import requests
+    import uiautomator2.exceptions as u2e
+    from walink.device import AdbCommandError, is_connection_loss
+    from walink.flows import FlowError
+    assert is_connection_loss(AdbCommandError("adb shell ... failed: device not found"))
+    assert is_connection_loss(u2e.ConnectError("agent gone"))
+    assert is_connection_loss(requests.exceptions.ConnectionError("refused"))
+    try:
+        try:
+            raise ConnectionResetError("reset by peer")
+        except ConnectionResetError as inner:
+            raise RuntimeError("wrapped") from inner
+    except RuntimeError as wrapped:
+        assert is_connection_loss(wrapped)                   # found through the cause chain
+    assert not is_connection_loss(FlowError("no chat named 'X'"))
+    assert not is_connection_loss(u2e.UiObjectNotFoundError({"code": -32002, "message": "x"}, ""))
+    assert not is_connection_loss(DeviceError("still visible after 30s"))

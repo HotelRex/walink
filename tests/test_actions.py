@@ -278,3 +278,90 @@ def test_last_message_resume_ignores_case(env):
     actions.last_message(env["ctx"], "PayPal")
     actions.last_message(env["ctx"], "paypal")
     assert [o[1] for o in env["order"] if o[0] == "last"] == [("PayPal", False), ("paypal", True)]
+
+
+# ---------- the phone drops off adb mid-action ----------
+def lost(msg="adb shell input tap failed: error: device not found"):
+    from walink.device import AdbCommandError
+    return AdbCommandError(msg)
+
+
+def once(env, name, then):
+    """flows.<name> raises a connection loss the first time, then behaves like `then`."""
+    state = {"n": 0}
+
+    def f(*a, **k):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise lost()
+        return then(*a, **k)
+    return f
+
+
+def test_lost_connection_restarts_the_action_once_and_succeeds(env, monkeypatch):
+    monkeypatch.setattr(flows, "read_devices", once(env, "read", lambda dev: env["info"]))
+    info = actions.list_devices(env["ctx"])
+    assert info["count"] == 3
+    assert len(env["devices"]) == 2                              # reconnected with a fresh device
+    assert env["devices"][1].calls[-1] == "lock_screen"
+    assert "LIST_RETRY" in env["audit"]() and "LIST_OK" in env["audit"]()
+
+
+def test_lost_during_removal_does_not_remove_twice(env, monkeypatch):
+    removed = []
+
+    def remove_then_drop(dev, name, dry_run):
+        removed.append(name)
+        env["info"] = {**DEVICES, "count": 2, "devices": [d for d in DEVICES["devices"] if d["name"] != name]}
+        raise lost()                                              # gone on the phone, but the cable came out
+    monkeypatch.setattr(flows, "remove_device", remove_then_drop)
+    actions.remove(env["ctx"], "Sara")
+    assert removed == ["Sara"] and len(env["devices"]) == 2
+    assert "REMOVE_OK" in env["audit"]()
+
+
+def test_lost_before_the_code_is_submitted_repeats_the_link(env, monkeypatch):
+    linked = []
+
+    def link_flow(dev, code, name, progress, on_submit=lambda: None):
+        if not linked:
+            linked.append("first")
+            raise lost()                                          # dropped while opening the code screen
+        on_submit()
+        linked.append(code)
+    monkeypatch.setattr(flows, "link_with_code", link_flow)
+    actions.link(env["ctx"], "ABCDEFGH", replace="Hotel Rex")
+    assert linked == ["first", "ABCDEFGH"] and len(env["devices"]) == 2
+
+
+def test_lost_after_the_code_is_submitted_is_not_repeated(env, monkeypatch):
+    calls = []
+
+    def link_flow(dev, code, name, progress, on_submit=lambda: None):
+        calls.append(code)
+        on_submit()
+        raise lost()
+    monkeypatch.setattr(flows, "link_with_code", link_flow)
+    with pytest.raises(actions.ActionFailed) as e:
+        actions.link(env["ctx"], "ABCDEFGH", replace="Hotel Rex")
+    assert calls == ["ABCDEFGH"] and len(env["devices"]) == 1
+    assert "already submitted" in str(e.value)
+    assert env["devices"][0].calls[-3:] == ["save_evidence", "go_home_and_reset_app", "lock_screen"]
+
+
+def test_lost_twice_fails_after_one_retry(env, monkeypatch):
+    def always(*a, **k):
+        raise lost()
+    monkeypatch.setattr(flows, "read_devices", always)
+    with pytest.raises(actions.ActionFailed) as e:
+        actions.list_devices(env["ctx"])
+    assert len(env["devices"]) == 2 and "lost the connection" in str(e.value)
+
+
+def test_screen_problems_are_not_retried(env, monkeypatch):
+    def boom(*a, **k):
+        raise flows.FlowError("no chat named 'X'")
+    monkeypatch.setattr(flows, "last_message", boom)
+    with pytest.raises(actions.ActionFailed):
+        actions.last_message(env["ctx"], "X")
+    assert len(env["devices"]) == 1 and "RETRY" not in env["audit"]()

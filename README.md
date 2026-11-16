@@ -63,11 +63,14 @@ The TUI and the commands are the same program with the same rules (`walink/actio
   Failure recovery and `keepalive` always use the force-stop + relaunch.
 - **adb not responding.** Before touching the phone, every run checks adb (`adb get-state`, 5 s). If it hangs or the
   phone is missing, walink reconnects (Wi-Fi ADB: `adb connect`), then restarts the adb server once (`kill-server`,
-  `start-server`, `connect`) and checks again; still nothing = the run fails with "adb not responding". This is the
-  only automatic retry: once the action has started, a hang fails the action (repeating a tap or a code could do it
-  twice). On such a failure the same check runs first; if adb is still dead the screenshot, app reset and screen lock
-  are skipped instead of each waiting out its 60 s timeout. Restarting the adb server affects every program using adb
-  on that machine: walink must be its only user.
+  `start-server`, `connect`) and checks again; still nothing = the run fails with "adb not responding".
+- **Phone lost mid-action** (cable pulled, Wi-Fi dropped): walink recovers adb the same way and, once the phone is
+  back, **starts the action again once from step 0** (audit: `<ACTION>_RETRY`). A device the first attempt already
+  removed is not removed again. A `link` is **not** repeated once the 8th code character was typed: the code works
+  only once, so check the list instead. A retried `link` can still fail if the code expired meanwhile (~1 minute).
+  Problems on the screen (a chat or a button not found) are never retried. If adb stays dead, the screenshot, app
+  reset and screen lock are skipped instead of each waiting out its 60 s timeout. Restarting the adb server affects
+  every program using adb on that machine: walink must be its only user.
 - A run leaves WhatsApp on the screen it ended on (the Linked devices list, or the chat it read) and remembers it in
   `state/screen.json`. The next run within **5 minutes** checks that the phone still shows that screen and continues from
   there (a second `list` takes ~5 s instead of ~10 s); otherwise, or after a failure, keepalive or reset, it starts
