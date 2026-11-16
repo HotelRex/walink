@@ -38,6 +38,7 @@ python walink.py unlink "Hotel Rex" [--yes]
 python walink.py last "PayPal" [--json]           # newest message of a chat (opens it: marks it READ)
 python walink.py keepalive
 python walink.py reset                         # force-stop + relaunch WhatsApp, go to the launcher (recovery)
+python walink.py update                        # install the newest WhatsApp Business from Google Play (daily cron)
 python walink.py --dry-run link ABCD-EFGH --replace "Hotel Rex"   # goes as far as possible, changes nothing
 ```
 The TUI and the commands are the same program with the same rules (`walink/actions.py`); see **TUI** below.
@@ -118,6 +119,34 @@ middle 60%), never the same pixel twice in a row. Launch/Home use `am start` (~0
 ```
 systemd alternative: a `walink-keepalive.service` running the same command and a `.timer` with `OnCalendar=*-*-1/3 09:10`.
 On Windows Task Scheduler, run `python walink.py keepalive` on a schedule from the checkout directory.
+
+## WhatsApp Business updates (daily, via goopdl)
+The phone has no Play Store, so `walink.py update` (`walink/update.py`) keeps WhatsApp Business current with
+[goopdl](https://pypi.org/project/goopdl/) (anonymous Google Play downloads through Aurora Store's token dispenser;
+no Google account):
+1. asks Google Play for the newest version (the **version check**);
+2. reads the installed version over adb; stops if it is not older (it never downgrades);
+3. downloads the base APK + split APKs for the phone's ABI to a temp dir (the phone lock is *not* held meanwhile);
+4. `adb install-multiple -r` (app data is kept; Android stops WhatsApp while it installs, the next walink run reopens
+   it) and reads the version back.
+```cron
+# every day at 04:20
+20 4 * * * cd /path/to/whatsapp-pair && .venv/bin/python walink.py update
+```
+Made for cron, which mails whatever a job prints:
+- **goopdl fails** (Play, the dispenser's rate limit of ~20 requests/hour, the network): **no output, exit 0**; tomorrow's
+  run tries again. **Phone busy** (another walink run): no output, exit 5. **Up to date**: no output, exit 0.
+- **Installed**: one line on stdout. **adb or install failure**: stderr, exit 2, `UPDATE_FAILED` in `logs/audit.log`
+  and to `notify_cmd`.
+- Every run writes one line or more to `logs/update.log`; `state/update.json` keeps the last successful version check
+  and the version Play offered. goopdl's token cache is `state/goopdl/`.
+- **Stale version check**: when no version check has succeeded for `update.stale_after_days` (default 7) days,
+  every run alerts the maintainer through `notify_maintainer()` in `walink/update.py`. **That is scaffolding for now**:
+  it only writes `MAINTAINER ...` to `logs/update.log` and `UPDATE_STALE` to `logs/audit.log` (the notification system
+  comes later). With a daily cron the alert repeats daily until a check succeeds.
+- `--dry-run update` checks both versions and says what it would install, without downloading.
+- If "Monitor apps installed by ADB" is on (Huawei), the phone may ask to confirm the install; unanswered, the install
+  times out after 10 minutes and fails. Turn the setting off, or confirm it the first time.
 
 ## Remote access over SSH (workstations)
 walink is an internal tool: an authorized workstation key can do everything walink can do. The guards are against

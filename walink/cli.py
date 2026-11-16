@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_last.add_argument("--json", action="store_true")
     sub.add_parser("keepalive")
     sub.add_parser("reset", help="force-stop + relaunch WhatsApp, then go to the launcher (recovery)")
+    sub.add_parser("update", help="install the newest WhatsApp Business from Google Play (goopdl); for a daily cron")
     return parser
 
 
@@ -153,6 +154,10 @@ def main(argv: list[str] | None = None, label: str | None = None) -> int:
             return EXIT_FAILED
         tui = importlib.import_module("walink.tui")
         return tui.run(cfg, label, serial=args.serial or cfg.get("serial"), dry_run=args.dry_run, debug=args.debug)
+
+    if args.cmd == "update":                    # its own rules for silence and exit codes (walink.update)
+        update = importlib.import_module("walink.update")
+        return update.run(cfg, serial=args.serial, dry_run=args.dry_run)
 
     ctx = actions.Context(cfg=cfg, label=label, confirm=_confirm_for(args),
                           serial=args.serial or cfg.get("serial"), dry_run=args.dry_run, progress=print_progress)

@@ -4,6 +4,7 @@ Everything above this layer (flows, CLI) uses these methods, so pacing
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -142,6 +143,48 @@ def ensure_adb(serial: str | None) -> str:
     if len(devs) != 1:
         raise DeviceError(f"expected exactly one adb device, found {devs}; pass --serial")
     return devs[0]
+
+
+# ---------- package install (walink.update): plain adb, no uiautomator2, no taps ----------
+INSTALL_TIMEOUT_S = 600                 # a ~70 MB APK set over Wi-Fi ADB, plus Android's dexopt
+
+
+def _adb_text(serial: str, *args: str, timeout: float = ADB_TIMEOUT_S) -> str:
+    try:
+        r = subprocess.run(["adb", "-s", serial, *args], capture_output=True, text=True, errors="replace",
+                           timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise DeviceError(f"adb {args[0]} timed out after {timeout:.0f}s")
+    except OSError as e:
+        raise DeviceError(f"adb could not run: {e}")
+    if r.returncode != 0:
+        raise DeviceError(f"adb {args[0]} failed: {(r.stderr or r.stdout).strip()}")
+    return r.stdout
+
+
+def primary_abi(serial: str) -> str:
+    """The phone's main ABI, e.g. "arm64-v8a"."""
+    return _adb_text(serial, "shell", "getprop", "ro.product.cpu.abi").strip()
+
+
+def installed_version(serial: str, package: str) -> tuple[int, str] | None:
+    """(versionCode, versionName) of an installed package; None when it is not installed."""
+    out = _adb_text(serial, "shell", "dumpsys", "package", package)
+    code = re.search(r"\bversionCode=(\d+)", out)
+    if not code:
+        return None
+    name = re.search(r"\bversionName=(\S+)", out)
+    return int(code.group(1)), name.group(1) if name else ""
+
+
+def install_apks(serial: str, files: list[Path]) -> None:
+    """Install (replace) one app from its base APK and split APKs. Keeps the app's data. Android stops the
+    app while it installs. Raises DeviceError unless adb reports Success."""
+    if not files:
+        raise DeviceError("nothing to install")
+    out = _adb_text(serial, "install-multiple", "-r", *map(str, files), timeout=INSTALL_TIMEOUT_S)
+    if "Success" not in out:
+        raise DeviceError(f"adb install-multiple: {out.strip() or 'no Success reported'}")
 
 
 class Device:

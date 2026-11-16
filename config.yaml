@@ -19,3 +19,7 @@ timing:
 remote:
   timeout_s: 240               # a one-shot SSH command is stopped (and the phone reset) after this
   # notify_cmd: "ntfy publish walink"   # optional; gets a one-line message on stdin (never message content)
+
+# walink.py update (daily cron): WhatsApp Business from Google Play through goopdl.
+update:
+  stale_after_days: 7          # no successful version check for this long -> alert the maintainer
