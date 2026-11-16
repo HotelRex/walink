@@ -44,8 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_link.add_argument("--name", help="name for the new device (default: the replaced name)")
     p_unlink = sub.add_parser("unlink", help="delete a linked device")
     p_unlink.add_argument("name")
+    p_unlink.add_argument("--yes", action="store_true", help="do not ask 'Are you sure?' (for scripts)")
+    # link --replace never asks; --yes is still accepted there because older scripts pass it.
+    p_link.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     for p in (p_link, p_unlink):
-        p.add_argument("--yes", action="store_true", help="do not ask 'Are you sure?' (for scripts)")
         p.add_argument("--confirm-remove", nargs="?", action=_RemovedFlag, help=argparse.SUPPRESS)
     p_last = sub.add_parser("last", help="open the chat NAME (marks it read) and print its newest message")
     p_last.add_argument("name")

@@ -32,7 +32,7 @@ Give the phone a DHCP reservation. Keep it charging and on Wi-Fi: with no SIM it
 python walink.py                              # the TUI (needs an interactive terminal)
 python walink.py status                       # model, Android version, screen, W4B installed
 python walink.py list [--json]
-python walink.py link ABCD-EFGH --replace "Hotel Rex"   # asks "Are you sure you want to delete Hotel Rex?"
+python walink.py link ABCD-EFGH --replace "Hotel Rex"   # deletes Hotel Rex and links the new one, no question
 python walink.py link ABCD-EFGH --name "Desk 2"         # only when a slot is free
 python walink.py unlink "Hotel Rex" [--yes]
 python walink.py last "PayPal" [--json]           # newest message of a chat (opens it: marks it READ)
@@ -45,9 +45,10 @@ The TUI and the commands are the same program with the same rules (`walink/actio
   steps in plain words (`40% Entering the code`); technical log lines only with `--debug`. Every run also writes
   `logs/<timestamp>/walink.log`.
 - Code input is normalized (dashes/spaces dropped, uppercased, 8 alphanumerics required).
-- Every removal (`unlink`, or the removal half of `link --replace`) asks `Are you sure you want to delete <NAME>?`
-  before the phone is touched. Scripts pass `--yes`; without a terminal and without `--yes` the command is refused.
-  Names in `protected_devices` are always refused, by every path.
+- `unlink` asks `Are you sure you want to delete <NAME>?` before the phone is touched. Scripts pass `--yes`; without a
+  terminal and without `--yes` it is refused. `link --replace` does **not** ask: replacing is what was asked for, and
+  the code expires quickly (`--yes` is still accepted there for older scripts). Names in `protected_devices` are always
+  refused, by every path.
 - Exit codes: `0` ok, `2` failed or usage error, `4` refused (protected, not confirmed, unknown device, list full), `5` phone busy.
 - Every run is written to `logs/audit.log` (who, what, outcome; never message content). `notify_cmd` (optional) gets
   link, remove, last-message and failure events.
@@ -60,6 +61,13 @@ The TUI and the commands are the same program with the same rules (`walink/actio
   phone has no PIN; it falls back to a swipe; ~1.9 s), bring WhatsApp Business to the front and back out to the chat list, like a
   person reopening the app. If that does not reach the chat list, it falls back to force-stop + relaunch (no data cleared).
   Failure recovery and `keepalive` always use the force-stop + relaunch.
+- **adb not responding.** Before touching the phone, every run checks adb (`adb get-state`, 5 s). If it hangs or the
+  phone is missing, walink reconnects (Wi-Fi ADB: `adb connect`), then restarts the adb server once (`kill-server`,
+  `start-server`, `connect`) and checks again; still nothing = the run fails with "adb not responding". This is the
+  only automatic retry: once the action has started, a hang fails the action (repeating a tap or a code could do it
+  twice). On such a failure the same check runs first; if adb is still dead the screenshot, app reset and screen lock
+  are skipped instead of each waiting out its 60 s timeout. Restarting the adb server affects every program using adb
+  on that machine: walink must be its only user.
 - A run leaves WhatsApp on the screen it ended on (the Linked devices list, or the chat it read) and remembers it in
   `state/screen.json`. The next run within **5 minutes** checks that the phone still shows that screen and continues from
   there (a second `list` takes ~5 s instead of ~10 s); otherwise, or after a failure, keepalive or reset, it starts
@@ -86,8 +94,8 @@ Run `python walink.py` (or log in over SSH, below). It opens on a menu; the phon
   and **Phone status** (`s`); the CLI always has them (`list`, `keepalive`, `status`).
 - While the phone works, a dialog shows the current step in plain words, a progress bar and the elapsed seconds.
   Results and errors appear in a dialog until you close it.
-- `[locked]` devices are protected: they cannot be picked for removal or replacement. Any removal asks
-  "Are you sure you want to delete <NAME>?", starting on **No**.
+- `[locked]` devices are protected: they cannot be picked for removal or replacement. **Remove** asks
+  "Are you sure you want to delete <NAME>?", starting on **No**; **Link** replaces the picked device without asking.
 - `q` during an action asks to quit after it finishes. If the SSH connection drops mid-action, the action still
   finishes and the phone is locked.
 - `--dry-run` (shown in the header) changes nothing; `--debug` adds a pane with the technical log lines.
@@ -120,7 +128,7 @@ mistakes (protected devices, "Are you sure?"), not against key holders. Setup is
 - `ssh -i <key> walink@controller` opens the **TUI** (Windows: use Windows Terminal with the built-in OpenSSH client).
 - `ssh -i <key> walink@controller "<command>"` runs **one** walink command, same syntax as `walink.py`
   (`"list --json"`, `"unlink 'Sara' --yes"`, `"last 'PayPal'"`); output streams back live, the exit code is passed through.
-  Without a terminal, removals need `--yes`. The older form `relink "<NAME>" <CODE>` still works
+  Without a terminal, `unlink` needs `--yes`. The older form `relink "<NAME>" <CODE>` still works
   (= `link CODE --replace NAME --yes`).
 - Everything shares **one lock** with the CLI, other TUIs and cron (a second request gets "busy", exit 5); a TUI holds it
   only while an action runs. If a one-shot command exceeds `remote.timeout_s` (240 s), it is stopped and

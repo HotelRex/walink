@@ -1,5 +1,5 @@
 """Full-screen terminal UI (Textual). A front end over walink.actions, exactly like the CLI: the same functions,
-the same rules, the same "Are you sure you want to delete <NAME>?" question.
+the same rules, the same "Are you sure you want to delete <NAME>?" question before a removal (replacing never asks).
 
 The start screen is a menu; the phone is only touched when an action is chosen. While the phone works a progress
 dialog shows the current step in plain words. Technical log lines appear only with --debug.

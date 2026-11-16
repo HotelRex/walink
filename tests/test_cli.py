@@ -24,8 +24,8 @@ def calls(monkeypatch):
     def fake(name, result=None):
         def f(ctx, *a, **k):
             calls.append((name, ctx, a, k))
-            if name in ("remove", "link") and not ctx.dry_run:
-                if not ctx.confirm(actions.CONFIRM_TEXT.format(name=a[0] if name == "remove" else k["replace"])):
+            if name == "remove" and not ctx.dry_run:
+                if not ctx.confirm(actions.CONFIRM_TEXT.format(name=a[0])):
                     raise actions.Refused("cancelled: nothing was removed")
             return result
         return f
@@ -58,6 +58,11 @@ def test_unlink_tty_asks(calls, monkeypatch, capsys):
 def test_link_replace_and_name_passed_through(calls):
     assert cli.main(["link", "abcd-efgh", "--replace", "Hotel Rex", "--yes"]) == 0
     assert calls[0][2] == ("abcd-efgh",) and calls[0][3] == {"replace": "Hotel Rex", "name": None}
+
+
+def test_link_replace_runs_without_terminal_or_yes(calls):
+    assert cli.main(["link", "abcd-efgh", "--replace", "Hotel Rex"]) == 0       # stdin is not a tty here
+    assert calls[0][0] == "link" and calls[0][3]["replace"] == "Hotel Rex"
 
 
 def test_confirm_remove_flag_errors(calls, capsys):

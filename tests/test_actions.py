@@ -9,8 +9,12 @@ FULL = {"count": 4, "max": 4, "devices": DEVICES["devices"] + [{"name": "B", "st
 
 
 class FakeDevice:
-    def __init__(self):
-        self.calls = []
+    def __init__(self, adb_alive=True):
+        self.calls, self.adb_alive = [], adb_alive
+
+    def adb_ok(self, recover=False):
+        self.calls.append(("adb_ok", recover))
+        return self.adb_alive
 
     def info(self):
         self.calls.append("info")
@@ -92,15 +96,16 @@ def test_remove_confirmed(env):
     assert "REMOVE" in env["audit"]() and env["notified"]
 
 
-def test_link_replace_confirms_then_removes_then_links(env):
+def test_link_replace_removes_then_links_without_asking(env):
+    env["answer"] = False                                       # would refuse if it were asked
     res = actions.link(env["ctx"], "abcd-efgh", replace="Hotel Rex")
-    assert env["confirms"] == ["Are you sure you want to delete Hotel Rex?"]
+    assert env["confirms"] == []
     assert names(env) == ["open", "read", "remove", "link", "verify"]
     assert env["order"][3][1][:2] == ("ABCDEFGH", "Hotel Rex")
     assert res["name"] == "Hotel Rex"
 
 
-def test_link_bad_code_fails_before_confirm(env):
+def test_link_bad_code_fails_before_touching_the_phone(env):
     with pytest.raises(CodeError):
         actions.link(env["ctx"], "ABC", replace="Hotel Rex")
     assert env["confirms"] == [] and env["devices"] == []
@@ -109,7 +114,7 @@ def test_link_bad_code_fails_before_confirm(env):
 def test_link_replace_protected_refused(env):
     with pytest.raises(actions.Refused):
         actions.link(env["ctx"], "ABCDEFGH", replace="Test")
-    assert env["devices"] == []
+    assert env["devices"] == [] and env["locks"] == 0
 
 
 def test_link_free_slot_needs_name_and_room(env):
@@ -145,6 +150,23 @@ def test_failure_saves_evidence_resets_locks_and_audits(env, monkeypatch):
     assert "Incorrect code" in str(e.value) and e.value.evidence is not None
     assert env["devices"][0].calls[-3:] == ["save_evidence", "go_home_and_reset_app", "lock_screen"]
     assert "FAILED" in env["audit"]() and any("FAILED" in n for n in env["notified"])
+
+
+def test_failure_with_dead_adb_skips_every_cleanup_step(env, monkeypatch):
+    def factory(serial, pacer):
+        env["devices"].append(FakeDevice(adb_alive=False))
+        return env["devices"][-1]
+    env["ctx"].device_factory = factory
+
+    def boom(*a, **k):
+        raise actions.DeviceError("adb shell input tap timed out after 60s")
+    monkeypatch.setattr(flows, "read_devices", boom)
+    with pytest.raises(actions.ActionFailed) as e:
+        actions.list_devices(env["ctx"])
+    assert e.value.evidence is None
+    assert env["devices"][0].calls[-1] == ("adb_ok", True)      # recovery tried once, then nothing else
+    assert not {"save_evidence", "go_home_and_reset_app", "lock_screen"} & set(env["devices"][0].calls)
+    assert "FAILED" in env["audit"]()
 
 
 def test_last_message_never_audits_content(env):

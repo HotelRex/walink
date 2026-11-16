@@ -3,7 +3,8 @@ are thin front ends over these functions, so they cannot behave differently.
 
 Rules applied here:
 - protected devices (config `protected_devices`) are never removed or replaced;
-- any removal asks `ctx.confirm("Are you sure you want to delete <NAME>?")` first (not in dry-run);
+- removing a device (`remove`) asks `ctx.confirm("Are you sure you want to delete <NAME>?")` first (not in
+  dry-run); replacing one (`link --replace`) does not ask: the device is swapped for the new link at once;
 - policy checks and the confirmation run BEFORE the phone is touched (no lock, no device);
 - the phone lock is held for one action only;
 - every action is audited; link, remove, last message and failures are also notified; never message content;
@@ -81,9 +82,13 @@ def _protected(cfg: dict) -> list[str]:
     return list(cfg.get("protected_devices") or [])
 
 
-def _check_removal(ctx: Context, name: str) -> None:
-    if name in _protected(ctx.cfg):
+def _check_protected(name: str, cfg: dict) -> None:
+    if name in _protected(cfg):
         raise Refused(f"'{name}' is protected")
+
+
+def _check_removal(ctx: Context, name: str) -> None:
+    _check_protected(name, ctx.cfg)
     if not ctx.dry_run and not ctx.confirm(CONFIRM_TEXT.format(name=name)):
         raise Refused("cancelled: nothing was removed")
 
@@ -108,6 +113,7 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
             notify(ctx.cfg, line)
 
     dev = None
+    adb_dead = False
     try:
         event("START", notify_ok)
         ctx.progress("Connecting to the phone", 0.02)
@@ -125,7 +131,11 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
             log.exception("FAILED (unexpected %s): %s", type(e).__name__, e)
         evidence = None
         screen_state.forget()
-        if dev:
+        if dev and not dev.adb_ok(recover=True):     # a dead adb would make each cleanup step wait out its timeout
+            adb_dead = True
+            log.error("adb is not responding (adb server restarted once): "
+                      "skipped the screenshot, the app reset and the screen lock")
+        elif dev:
             dev.save_evidence(run_dir)
             evidence = run_dir
             try:
@@ -136,7 +146,7 @@ def _session(ctx: Context, action: str, detail: str = "", notify_ok: bool = Fals
         raise ActionFailed(str(e), evidence) from e
     finally:
         try:
-            if dev and phone_lock and ctx.cfg.get("lock_screen_when_done", True):
+            if dev and not adb_dead and phone_lock and ctx.cfg.get("lock_screen_when_done", True):
                 try:
                     ctx.progress("Locking the phone", 0.97)
                     dev.lock_screen()
@@ -185,7 +195,7 @@ def link(ctx: Context, code: str, *, replace: str | None = None, name: str | Non
     if not new_name:
         raise Refused("a name for the new device is needed")
     if replace:
-        _check_removal(ctx, replace)
+        _check_protected(replace, ctx.cfg)          # no "Are you sure?": replacing is what was asked for
     detail = f"replace='{replace}' name='{new_name}'" if replace else f"name='{new_name}'"
     with _session(ctx, "LINK", detail, notify_ok=True) as dev:
         _to_linked_devices(ctx, dev)

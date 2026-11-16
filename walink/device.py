@@ -20,6 +20,10 @@ from .humanize import Pacer
 log = logging.getLogger("walink")
 
 ADB_TIMEOUT_S = 60
+# adb health check and recovery (walink.device.ensure_adb): a quick probe, then one restart of the adb server.
+ADB_PROBE_TIMEOUT_S = 5
+ADB_SERVER_TIMEOUT_S = 15
+ADB_RECOVER_WAIT_S = 15
 # Before tapping, an element must be at the same place in two lookups in a row (each lookup takes ~250 ms).
 SETTLE_STEP_S = 0.05
 SETTLE_TIMEOUT_S = 3
@@ -34,11 +38,97 @@ class DeviceError(RuntimeError):
     pass
 
 
+def _run_adb(*args: str, timeout: float) -> subprocess.CompletedProcess | None:
+    """A plain adb command for the health check; None when adb is missing or the command hangs."""
+    try:
+        return subprocess.run(["adb", *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _is_network(serial: str) -> bool:
+    return ":" in serial                                    # Wi-Fi ADB: "PHONE_IP:5555"
+
+
+def adb_alive(serial: str) -> bool:
+    """True when the adb server answers within a few seconds and the phone is online ("device")."""
+    r = _run_adb("-s", serial, "get-state", timeout=ADB_PROBE_TIMEOUT_S)
+    return bool(r and r.returncode == 0 and r.stdout.strip() == "device")
+
+
+def _wait_alive(serial: str) -> bool:
+    end = time.time() + ADB_RECOVER_WAIT_S
+    while True:
+        if adb_alive(serial):
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(1)
+
+
+def _list_devices() -> list[str] | None:
+    """Serials in state "device"; None when `adb devices` cannot run or hangs."""
+    r = _run_adb("devices", timeout=ADB_PROBE_TIMEOUT_S)
+    if r is None or r.returncode != 0:
+        return None
+    return [line.split()[0] for line in r.stdout.splitlines()[1:] if line.strip().endswith("device")]
+
+
+def restart_adb_server(serial: str | None) -> None:
+    """kill-server + start-server (+ connect again for Wi-Fi ADB). Each step is time-limited; errors are ignored,
+    the caller checks the result. Restarts adb for every program on this machine (walink must be its only user)."""
+    log.warning("adb is not responding: restarting the adb server")
+    _run_adb("kill-server", timeout=ADB_SERVER_TIMEOUT_S)
+    _run_adb("start-server", timeout=ADB_SERVER_TIMEOUT_S)
+    if serial and _is_network(serial):
+        _run_adb("connect", serial, timeout=ADB_SERVER_TIMEOUT_S)
+
+
+def recover_adb(serial: str) -> bool:
+    """Bring adb back for `serial`: for Wi-Fi ADB first a plain `adb connect`, then one server restart."""
+    if _is_network(serial):
+        log.warning("phone %s not reachable over adb: reconnecting", serial)
+        _run_adb("connect", serial, timeout=ADB_SERVER_TIMEOUT_S)
+        if adb_alive(serial):
+            return True
+    restart_adb_server(serial)
+    return _wait_alive(serial)
+
+
+def ensure_adb(serial: str | None) -> str:
+    """Before an action touches the phone: check adb, recover once if needed, return the serial to use.
+    Safe to retry here because nothing has been done on the phone yet."""
+    if serial:
+        if adb_alive(serial) or recover_adb(serial):
+            return serial
+        raise DeviceError(f"adb not responding: restarted the adb server, still no phone at {serial}")
+    devs = _list_devices()
+    restarted = not devs
+    if restarted:                                           # adb hung, failed, or sees no phone
+        restart_adb_server(None)
+        end = time.time() + ADB_RECOVER_WAIT_S
+        while not devs and time.time() < end:
+            time.sleep(1)
+            devs = _list_devices()
+        if devs is None:
+            raise DeviceError("adb not responding: restarted the adb server, 'adb devices' still fails")
+    if not devs:
+        raise DeviceError("no phone found over adb (adb server restarted once): check the USB cable and the RSA "
+                          "prompt, or set 'serial: PHONE_IP:5555' for Wi-Fi ADB")
+    if len(devs) != 1:
+        raise DeviceError(f"expected exactly one adb device, found {devs}; pass --serial")
+    return devs[0]
+
+
 class Device:
     def __init__(self, serial: str | None = None, pacer: Pacer | None = None):
         self.pacer = pacer or Pacer()
-        self._serial = serial or self._only_serial()
+        self._serial = ensure_adb(serial)
         self._d = _u2.connect(self._serial)
+
+    def adb_ok(self, recover: bool = False) -> bool:
+        """Quick check that adb still reaches the phone; with `recover`, one reconnect/restart attempt first."""
+        return adb_alive(self._serial) or (recover and recover_adb(self._serial))
 
     # ---------- raw adb (private) ----------
     def _adb(self, *args: str, binary: bool = False, check: bool = True):
@@ -49,18 +139,6 @@ class Device:
         if check and r.returncode != 0:
             raise DeviceError(f"adb {' '.join(args)} failed: {r.stderr.decode(errors='replace')}")
         return r.stdout if binary else r.stdout.decode(errors="replace")
-
-    @staticmethod
-    def _only_serial() -> str:
-        try:
-            out = subprocess.run(["adb", "devices"], capture_output=True, text=True,
-                                 timeout=ADB_TIMEOUT_S).stdout.splitlines()[1:]
-        except (OSError, subprocess.TimeoutExpired) as e:
-            raise DeviceError(f"cannot run 'adb devices': {e}")
-        devs = [line.split()[0] for line in out if line.strip().endswith("device")]
-        if len(devs) != 1:
-            raise DeviceError(f"expected exactly one adb device, found {devs or 'none'}; pass --serial")
-        return devs[0]
 
     # ---------- read-only inspection (no pacing needed) ----------
     def info(self) -> dict:

@@ -15,7 +15,8 @@ INFO = {"count": 3, "max": 4, "devices": [
 
 
 class FakeActions:
-    """Same names as walink.actions; link/remove ask ctx.confirm and report progress like the real ones."""
+    """Same names as walink.actions; remove asks ctx.confirm (link never does) and both report progress like the
+    real ones."""
     Refused = real_actions.Refused
     ActionFailed = real_actions.ActionFailed
     CONFIRM_TEXT = real_actions.CONFIRM_TEXT
@@ -37,9 +38,8 @@ class FakeActions:
 
     def link(self, ctx, code, *, replace=None, name=None):
         self.calls.append(("link", code, replace, name))
-        if replace and not ctx.confirm(self.CONFIRM_TEXT.format(name=replace)):
-            self.calls.append(("declined",))
-            raise self.Refused("cancelled: nothing was removed")
+        if replace:
+            ctx.progress(f"Removing '{replace}'", 0.25)
         ctx.progress("Entering the code", 0.5)
         self._wait()
         return {"name": name or replace, "status": "Active now"}
@@ -235,22 +235,22 @@ def test_short_code_keeps_link_disabled():
     run(go())
 
 
-def test_replace_confirm_default_no():
+def test_replace_does_not_ask_are_you_sure():
     async def go():
         app, fake, notes = make_app()
+        fake.gate = threading.Event()
         async with app.run_test(size=(110, 32)) as pilot:
             await pilot.press("l")
             await wait_screen(pilot, app, "DevicePickScreen")
-            await pilot.press("enter")
+            await pilot.press("enter")                           # Hotel Rex
             await wait_screen(pilot, app, "LinkScreen")
             app.screen.query_one("#code").value = "ABCDEFGH"
             await pilot.pause()
             await pilot.click("#run")
-            await wait_screen(pilot, app, "ConfirmScreen")
-            assert app.screen.question == "Are you sure you want to delete Hotel Rex?"
-            await pilot.press("enter")                           # focus starts on No
-            await wait_for(pilot, lambda: app.busy is None, "action end")
-            assert ("declined",) in fake.calls and "Nothing was changed" in notes
+            await wait_screen(pilot, app, "ProgressScreen")      # straight to work, no ConfirmScreen
+            fake.gate.set()
+            await wait_screen(pilot, app, "MessageScreen")
+            assert ("link", "ABCDEFGH", "Hotel Rex", "Hotel Rex") in fake.calls
     run(go())
 
 
