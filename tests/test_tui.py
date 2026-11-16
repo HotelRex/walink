@@ -168,6 +168,21 @@ def test_typed_chat_name_with_unicode():
     run(go())
 
 
+def test_read_button_reads_the_highlighted_quick_chat():
+    async def go():
+        app, fake, _ = make_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("m")
+            await wait_screen(pilot, app, "LastScreen")
+            quick = app.screen.query_one("#quick")
+            await pilot.pause()
+            chat = str(quick.get_option_at_index(quick.highlighted).prompt)
+            await pilot.click("#read")                     # mouse, nothing typed
+            await wait_screen(pilot, app, "MessageScreen")
+            assert ("last", chat) in fake.calls
+    run(go())
+
+
 def test_link_picker_shows_locked_and_free_slot_and_refuses_locked():
     async def go():
         app, fake, notes = make_app()

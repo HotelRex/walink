@@ -252,10 +252,24 @@ class LastScreen(ModalScreen):
         if event.value.strip():
             self.dismiss(event.value.strip())
 
+    def _chosen(self) -> str | None:
+        """The typed name, else the highlighted quick chat (what Enter in the list would read)."""
+        typed = self.query_one("#chat", Input).value.strip()
+        if typed:
+            return typed
+        if self.chats:
+            quick = self.query_one("#quick", OptionList)
+            if quick.highlighted is not None:
+                return str(quick.get_option_at_index(quick.highlighted).prompt)
+        return None
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        value = self.query_one("#chat", Input).value.strip()
-        if event.button.id == "read" and value:
-            self.dismiss(value)
+        if event.button.id == "read":
+            chat = self._chosen()
+            if chat:
+                self.dismiss(chat)
+            else:
+                self.notify("Pick a chat or type its name first.", severity="warning")
         elif event.button.id == "cancel":
             self.dismiss(None)
 
